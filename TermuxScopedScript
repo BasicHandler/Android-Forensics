@@ -1,0 +1,1484 @@
+#!/data/data/com.termux/files/usr/bin/bash
+
+
+# === Color Codes for Display ===
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+BLUE='\033[1;34m'
+PURPLE='\033[0;35m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+
+# == Identity ==
+echo -e "${PURPLE}###  - GET DESCRIPTIONS A Digital Recon & Live Forensics Tool From The Code Transparency Lab"
+echo -e "Session: ${BLUE}$(date '+%Y-%m-%d %H:%M:%S')${NC}"
+echo -e "Platform: $(uname -o) $(uname -m) | Bash ${GREEN}$BASH_VERSION${NC}"
+
+
+# == Log Setup ==
+timestamp=$(date +%Y%m%d_%H%M%S)
+descriptions_log="descriptions_${timestamp}.txt"
+system_log="descriptions-system_${timestamp}.txt"
+forensics_log="forensics_${timestamp}.txt"
+forensics_sys_log="forensics-system_${timestamp}.txt"
+evidence_log="evidence_${timestamp}.txt"
+evidence_dir="evidence_${timestamp}"
+base64_evidence_file="$evidence_dir/base64_evidence_${timestamp}.txt"  # ADD THIS
+mkdir -p "$evidence_dir"
+hash_log="file-hashmap_${timestamp}.txt"
+
+
+# Clear logs on each run
+: > G_errors.log
+: > "$descriptions_log"
+: > "$system_log"
+: > "$forensics_log"
+: > "$forensics_sys_log"
+: > geo-ip-log.txt
+: > arin-intel.txt
+: > threat-indicators.txt
+
+
+# == Flags ==
+ext=true
+quiet=false
+geoip_mode=true
+log_desc=true
+log_sys=true
+do_r2scan=false
+memwatch_mode=false
+log_all=false
+display_view=false
+# NEW FLAGS for package descriptions
+show_dependencies=false
+show_extended=false
+
+
+# == Args ==
+for arg in "$@"; do
+  case "$arg" in
+    # Existing flags
+    -E) ext=true ;;
+    -1) log_desc=true ;;
+    -2) log_sys=true ;;
+    -L) log_all=true ;;
+    -M) memwatch_mode=true ;;
+    --geoip) geoip_mode=true ;;
+    --r2scan) do_r2scan=true ;;
+    -t1) quiet=true ;;
+    -D) display_view=true ;;
+    
+    # NEW FLAGS for package descriptions
+    -x|--extended) show_extended=true ;;
+    -xf|--extended-full) 
+      show_dependencies=true
+      show_extended=true 
+      ;;
+    -d|--dependencies) show_dependencies=true ;;
+    
+    -h|--help)
+      echo
+      echo "Usage: ./G.sh [options]"
+      echo
+      echo "Package Analysis:"
+      echo "  -1         Include Termux/Python package descriptions"
+      echo "  -2         Include system libs & Proot distro listings"
+      echo "  -E         Show extended metadata (deps, homepage, version)"
+      echo "  -x         Show extended package info (homepage, version, maintainer)"
+      echo "  -d         Show package dependencies"
+      echo "  -xf        Show both extended info and dependencies"
+      echo
+      echo "Forensics & Analysis:"
+      echo "  -L         Enable full logging (packages, binaries, network)"
+      echo "  -M         Run memwatch module (process/memory snapshot scan)"
+      echo "  --r2scan   Activate ELF forensics with entropy/IP/syscall analysis"
+      echo "  --geoip    Enable ARIN IP tracing for embedded or runtime IPs"
+      echo
+      echo "Output Control:"
+      echo "  -t1        Quiet mode (stdout off, log only)"
+      echo "  -D         Scroll logs post-run using pager"
+      echo "  -h, --help Show this help message and exit"
+      echo
+      echo "Evidence files are stored in: evidence_TIMESTAMP/"
+      echo "Review evidence with: find evidence_*/ -name '*.txt' -exec less {} +"
+      echo
+      exit 0 ;;
+  esac
+done
+
+
+# == Dependency Installer ==
+install_dependencies() {
+  echo "[*] Verifying required tools..."
+  log="install_log_${timestamp}.txt"
+  fail="missing_tools_${timestamp}.log"
+  local required=(
+    curl wget git tar unzip file grep coreutils bc
+    man whois python binutils radare2 less termux-tools
+)
+
+
+  local network_tools=(iputils-ping iputils-tracepath)
+
+
+  : > "$log"
+  : > "$fail"
+
+
+  for tool in "${required[@]}"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      if pkg list-all | grep -q "^$tool/"; then
+        echo "[*] Installing: $tool" >> "$log"
+        pkg install -y "$tool" >> "$log" 2>&1 || echo "$tool" >> "$fail"
+      else
+        echo "[!] Package not found in repo: $tool" >> "$fail"
+      fi
+    fi
+  done
+
+
+  for nettool in "${network_tools[@]}"; do
+    dpkg -s "$nettool" >/dev/null 2>&1 || pkg install -y "$nettool" >> G_errors.log 2>&1
+  done
+
+
+  if ! command -v pip >/dev/null 2>&1; then
+    pkg install -y python >> "$log" 2>&1 && python -m ensurepip --upgrade >> "$log" 2>&1
+  fi
+}
+
+
+# == Safe rabin2 string extractor ==
+safe_rabin2_strings() {
+  local binary="$1"
+  
+  # Check if rabin2 is available
+  if command -v rabin2 >/dev/null 2>&1; then
+    rabin2 -z "$binary" 2>/dev/null | sed 's/\\x/\\\\x/g'
+  else
+    # Fallback to strings command
+    strings "$binary" 2>/dev/null | sed 's/\\x/\\\\x/g'
+  fi
+}
+
+
+# == Describer ==
+get_description() {
+  local pkg="$1"
+  local show_deps="$2"
+  local show_ext="$3"
+  
+  pkg_show=$(pkg show "$pkg" 2>/dev/null)
+  if [ -n "$pkg_show" ]; then
+    desc=$(echo "$pkg_show" | grep -i 'Description:' | cut -d: -f2- | sed 's/^ *//')
+    if [ -n "$desc" ]; then
+      echo -e "${GREEN}$pkg${NC}: $desc"
+      [ "$show_deps" = "true" ] && \
+        echo -e "${BLUE}  Depends:${NC} $(echo "$pkg_show" | grep -i 'Depends:' | cut -d: -f2-)"
+      if [ "$show_ext" = "true" ]; then
+        echo -e "${BLUE}  Homepage:${NC} $(echo "$pkg_show" | grep -i 'Homepage:' | cut -d: -f2-)"
+        echo -e "${BLUE}  Version :${NC} $(echo "$pkg_show" | grep -i 'Version:'  | cut -d: -f2-)"
+        echo -e "${BLUE}  Maintainer:${NC} $(echo "$pkg_show" | grep -i 'Maintainer:' | cut -d: -f2-)"
+      fi
+      return
+    fi
+  fi
+
+
+  echo -e "${RED}$pkg: No description found${NC}"
+}
+
+
+# == Python Describer ==
+list_python_packages() {
+  echo "[*] Scanning Python packages..."
+  
+  if ! command -v pip >/dev/null 2>&1; then
+    echo -e "${RED}[!] pip not available${NC}"
+    return
+  fi
+  
+  # Use process substitution instead of pipe to avoid subshell issues
+  while IFS= read -r line; do
+    name=$(echo "$line" | awk '{print $1}')
+    version=$(echo "$line" | awk '{print $2}')
+    
+    if [ -n "$name" ] && [ "$name" != "Package" ]; then
+      summary=$(pip show "$name" 2>/dev/null | grep -i "^Summary:" | cut -d: -f2- | sed 's/^ *//')
+      summary=${summary:-"No description"}
+      echo -e "${GREEN}Python pkg:${NC} $name ${BLUE}($version)${NC} — $summary"
+    fi
+  done < <(pip list --format=columns 2>/dev/null | tail -n +3)
+}
+
+
+# == Parse & Log ==
+parse_descriptions() {
+  local show_ext="$1"
+  local quiet_mode="$2"
+  echo "[*] Logging Termux packages..."
+  pkg list-installed | cut -d/ -f1 | while read -r pkg; do
+    get_description "$pkg" "$show_ext" "$show_ext" >> "$descriptions_log"
+    [ "$quiet_mode" = "false" ] && get_description "$pkg" "$show_ext" "$show_ext"
+  done
+
+
+  echo "[*] Logging Python packages..."
+  list_python_packages >> "$descriptions_log"
+}
+
+
+# == System Scan ==
+scan_system_libraries() {
+  echo "[*] Scanning system libraries..."
+  find /system/lib* /vendor/lib* /apex/*/lib* -type f -name "*.so*" 2>/dev/null | sort -u
+}
+
+
+scan_proot_pkgs() {
+  command -v proot-distro >/dev/null || return
+  proot-distro list | awk '/installed/ {print $1}' | while read -r distro; do
+    echo "[*] Proot: $distro"
+    proot-distro login "$distro" -- dpkg -l 2>/dev/null | awk '{print $2, $3}' | sed '1,5d'
+  done
+}
+
+
+# == Enhanced Memory Threat Snapshot ==
+memwatch_analysis() {
+  local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
+  local log="memwatch_${timestamp}.txt"
+  local threat_log="memwatch_threat_${timestamp}.txt"
+  local match=false
+  echo "[*] Memory Sweep: $timestamp" > "$log"
+
+
+  ps -A 2>/dev/null | tail -n +2 | while read -r pid rest; do
+    maps_path="/proc/$pid/maps"
+    cmd_path="/proc/$pid/cmdline"
+
+
+    # Memory RWX regions
+    if [ -r "$maps_path" ]; then
+      if grep -q 'rwxp' "$maps_path"; then
+        echo "  [·] RWX memory detected in PID $pid" >> "$log"
+        match=true
+      fi
+    fi
+
+
+    # Suspicious command-line behavior
+    if [ -r "$cmd_path" ]; then
+      cmd=$(tr '\0' ' ' < "$cmd_path" | xargs)
+      if echo "$cmd" | grep -Eiq 'eval|base64|sh -c|curl|wget|am start|/dev/|\.tmp'; then
+        echo "  [·] Suspicious command line in PID $pid → $cmd" >> "$log"
+        match=true
+      fi
+
+
+      # Enhanced IP scraping from command line with proper logging
+      local ips
+      ips=$(echo "$cmd" | grep -Eo '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b')
+      for ip in $ips; do
+        echo "  [·] IP found in PID $pid → $ip" >> "$log"
+        log_geoip_activity "$ip" "memwatch:PID_$pid" "FOUND" "Extracted from process command line"
+        if $geoip_mode; then
+          enhanced_arin_lookup "$ip" "memwatch:PID_$pid"
+        else
+          log_geoip_activity "$ip" "memwatch:PID_$pid" "SKIPPED" "GeoIP mode disabled"
+        fi
+        match=true
+      done
+    fi
+  done
+
+
+  # Fallback logging if no matches
+  if ! $match; then
+    echo "  [·] No suspicious memory activity detected." >> "$log"
+    echo "[*] Memwatch completed - no suspicious activity found" >> geo-ip-log.txt
+  else
+    cp "$log" "$threat_log"
+    echo "[*] Memwatch completed - suspicious activity logged" >> geo-ip-log.txt
+  fi
+
+
+  echo "[*] Memwatch log saved as: $log"
+  sha256sum "$log" >> "integrity_${timestamp}.txt"
+}
+
+
+# === Enhanced Entropy Analysis Module ===
+entropy_profile() {
+  local file="$1"
+  local entropy=""
+  local byte_count=0
+  
+  # Input validation
+  if [ ! -f "$file" ]; then
+    echo "  ↳ File not found for entropy analysis: $file"
+    return 1
+  fi
+  
+  if [ ! -r "$file" ]; then
+    echo "  ↳ File not readable for entropy analysis: $file"
+    return 1
+  fi
+  
+  # Check if file is empty
+  if [ ! -s "$file" ]; then
+    echo "  ↳ Empty file - entropy calculation skipped"
+    return 1
+  fi
+  
+  # Calculate Shannon entropy using awk (more portable than bc)
+  entropy=$(xxd -p "$file" 2>/dev/null | tr -d '\n' | fold -w2 | sort | uniq -c | \
+    awk '
+    BEGIN { 
+      total = 0
+      max_idx = 0
+    }
+    {
+      count[++max_idx] = $1
+      total += $1
+    }
+    END {
+      if (total == 0) {
+        print "0.000"
+        exit
+      }
+      
+      entropy = 0
+      for (i = 1; i <= max_idx; i++) {
+        if (count[i] > 0) {
+          probability = count[i] / total
+          entropy -= probability * log(probability) / log(2)
+        }
+      }
+      
+      printf "%.3f", entropy
+    }' 2>/dev/null)
+  
+  # Validate entropy calculation result
+  if [ -z "$entropy" ] || [ "$entropy" = "0.000" ]; then
+    echo "  ↳ Entropy calculation failed or file contains no data"
+    return 1
+  fi
+  
+  echo "  ↳ Shannon Entropy: $entropy bits/byte"
+  
+  # Enhanced entropy classification with awk floating-point comparison
+  # Why awk instead of bc:
+  # 1. awk is more universally available (POSIX compliant)
+  # 2. bc might not be installed by default on minimal systems
+  # 3. awk handles floating point natively without external dependencies
+  # 4. More reliable exit codes in shell conditionals
+  
+  if awk -v e="$entropy" 'BEGIN { exit !(e > 7.9) }'; then
+    echo "  [!] CRITICAL entropy (>7.9) — likely encrypted, packed, or compressed"
+    echo "      ↳ Indicators: AES encryption, UPX packing, or high-compression algorithms"
+    return 3  # Critical threat level
+    
+  elif awk -v e="$entropy" 'BEGIN { exit !(e > 7.5) }'; then
+    echo "  [!] HIGH entropy (7.5-7.9) — strong obfuscation or encoding suspected"
+    echo "      ↳ Indicators: Base64 encoding, XOR obfuscation, or mixed binary data"
+    return 2  # High threat level
+    
+  elif awk -v e="$entropy" 'BEGIN { exit !(e > 7.0) }'; then
+    echo "  [·] MODERATE entropy (7.0-7.5) — potentially mixed content"
+    echo "      ↳ Indicators: Embedded resources, compressed sections, or structured data"
+    return 1  # Medium threat level
+    
+  elif awk -v e="$entropy" 'BEGIN { exit !(e > 5.0) }'; then
+    echo "  [·] NORMAL entropy (5.0-7.0) — typical executable content"
+    echo "      ↳ Indicators: Standard compiled code with normal string/data distribution"
+    return 0  # Normal
+    
+  else
+    echo "  [·] LOW entropy (<5.0) — likely uncompressed text or repetitive data"
+    echo "      ↳ Indicators: Plain text, debug symbols, or highly repetitive patterns"
+    return 0  # Normal/benign
+  fi
+}
+
+
+# === Enhanced Entropy Context Analysis ===
+entropy_context_analysis() {
+  local file="$1"
+  local entropy_result
+  local threat_level
+  
+  echo "  [*] Performing entropy context analysis..."
+  
+  # Run entropy analysis and capture return code
+  entropy_profile "$file"
+  threat_level=$?
+  
+  # Additional context based on file type and size
+  local file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo "0")
+  local file_type=$(file -b "$file" 2>/dev/null || echo "unknown")
+  
+  echo "  ↳ File size: $file_size bytes"
+  echo "  ↳ File type: $file_type"
+  
+  # Size-based entropy expectations
+  if [ "$file_size" -lt 1024 ]; then
+    echo "  ↳ Small file (<1KB) - entropy may be less reliable"
+  elif [ "$file_size" -gt 10485760 ]; then  # 10MB
+    echo "  ↳ Large file (>10MB) - entropy calculation may take time"
+  fi
+  
+  # File type context
+  case "$file_type" in
+    *"ELF"*|*"executable"*)
+      echo "  ↳ Executable binary - moderate entropy expected (6.0-7.5)"
+      ;;
+    *"shared object"*|*"library"*)
+      echo "  ↳ Shared library - moderate to high entropy expected (6.5-7.8)"
+      ;;
+    *"archive"*|*"compressed"*)
+      echo "  ↳ Compressed/archive - high entropy expected (>7.5)"
+      ;;
+    *"text"*|*"ASCII"*)
+      echo "  ↳ Text file - low to moderate entropy expected (3.0-6.0)"
+      ;;
+    *)
+      echo "  ↳ Unknown file type - entropy interpretation may vary"
+      ;;
+  esac
+  
+  return $threat_level
+}
+
+
+# === Byte Distribution Analysis ===
+analyze_byte_distribution() {
+  local file="$1"
+  
+  echo "  [*] Byte frequency distribution analysis:"
+  
+  # Get top 8 most frequent bytes and their percentages
+  xxd -p "$file" 2>/dev/null | tr -d '\n' | fold -w2 | sort | uniq -c | \
+    awk '
+    BEGIN { total = 0 }
+    { 
+      count[$2] = $1
+      total += $1 
+    }
+    END {
+      # Sort by frequency and show top 8
+      n = asorti(count, sorted_bytes, "@val_num_desc")
+      
+      print "     ┌─────────┬──────────┬─────────────┐"
+      print "     │  Byte   │   Count  │ Percentage  │"
+      print "     ├─────────┼──────────┼─────────────┤"
+      
+      for (i = 1; i <= (n > 8 ? 8 : n); i++) {
+        byte = sorted_bytes[i]
+        freq = count[byte]
+        percent = (freq / total) * 100
+        printf "     │  0x%s   │ %8d │    %6.2f%%  │\n", byte, freq, percent
+      }
+      
+      print "     └─────────┴──────────┴─────────────┘"
+      
+      # Check for suspicious patterns
+      max_freq = count[sorted_bytes[1]]
+      max_percent = (max_freq / total) * 100
+      
+      if (max_percent > 50) {
+        printf "     [!] Dominant byte pattern detected (%.1f%%) - possible padding/encryption\n", max_percent
+      } else if (max_percent > 30) {
+        printf "     [·] High frequency byte detected (%.1f%%) - check for patterns\n", max_percent
+      }
+      
+      # Check for uniform distribution (possible encryption)
+      if (n >= 200 && max_percent < 5) {
+        print "     [!] Highly uniform distribution - likely encrypted or random data"
+      }
+    }'
+}
+
+
+# === Complete Entropy Analysis Wrapper ===
+comprehensive_entropy_analysis() {
+  local file="$1"
+  local evidence_log="$2"  # Optional evidence log file
+  
+  echo "[*] === ENTROPY ANALYSIS FOR $(basename "$file") ==="
+  
+  # Basic entropy calculation
+  local threat_level
+  entropy_context_analysis "$file"
+  threat_level=$?
+  
+  # Byte distribution analysis
+  analyze_byte_distribution "$file"
+  
+  # Log to evidence if provided
+  if [ -n "$evidence_log" ]; then
+    {
+      echo "ENTROPY_ANALYSIS: $(basename "$file")"
+      echo "Timestamp: $(date)"
+      entropy_context_analysis "$file" 2>&1
+      analyze_byte_distribution "$file" 2>&1
+      echo "Threat Level: $threat_level"
+      echo "---"
+    } >> "$evidence_log"
+  fi
+  
+  return $threat_level
+}
+
+
+# === Enhanced Base64 Blob Heuristic ===
+detect_base64_blobs() {
+  local strings="$1"
+  
+  echo "$strings" | grep -Eo '[A-Za-z0-9+/=]{24,}' | grep -E '^([A-Za-z0-9+/]{4})+$' > "$base64_evidence_file"
+  
+  if [ -s "$base64_evidence_file" ]; then
+    awk '{seen[$0]++} END {
+      for (b in seen) {
+        if (seen[b]>1) {
+          printf "  [·] Repeated base64 blob (%dx): %s...\n", seen[b], substr(b,1,32)
+          printf "      ↳ Full string: %s\n", b
+        }
+      }
+    }' "$base64_evidence_file"
+  fi
+  
+  # Don't remove the file - keep it for evidence
+  # rm -f "$base64_evidence_file"
+}
+
+
+# === Enhanced Pattern Detection with Evidence ===
+check_pattern_with_evidence() {
+  local strings="$1"
+  local pattern="$2"
+  local description="$3"
+  local severity="$4"  # [!] or [·]
+  local max_matches="${5:-3}"  # Limit output to avoid spam
+  
+  local matches
+  matches=$(echo "$strings" | grep -Ei "$pattern" | head -"$max_matches")
+  
+  if [ -n "$matches" ]; then
+    echo "  $severity $description"
+    echo "$matches" | while IFS= read -r match; do
+      # Truncate very long lines
+      if [ ${#match} -gt 80 ]; then
+        echo "      ↳ ${match:0:77}..."
+      else
+        echo "      ↳ $match"
+      fi
+    done
+    return 0  # Pattern found
+  fi
+  return 1    # Pattern not found
+}
+
+
+# == Enhanced GeoIP Logging ==
+log_geoip_activity() {
+  local ip="$1"
+  local source_file="$2"
+  local action="$3"  # "FOUND", "LOOKUP_SUCCESS", "LOOKUP_FAILED", "SKIPPED"
+  local details="$4"
+  local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  
+  case "$action" in
+    "FOUND")
+      echo "[$timestamp] IP_DISCOVERED: $ip in $(basename "$source_file")" >> geo-ip-log.txt
+      ;;
+    "LOOKUP_SUCCESS")
+      echo "[$timestamp] LOOKUP_SUCCESS: $ip -> $details" >> geo-ip-log.txt
+      ;;
+    "LOOKUP_FAILED")
+      echo "[$timestamp] LOOKUP_FAILED: $ip -> $details" >> geo-ip-log.txt
+      ;;
+    "SKIPPED")
+      echo "[$timestamp] LOOKUP_SKIPPED: $ip -> $details" >> geo-ip-log.txt
+      ;;
+    "ERROR")
+      echo "[$timestamp] ERROR: $ip -> $details" >> geo-ip-log.txt
+      ;;
+  esac
+}
+
+
+# == GeoIP Session Summary ==
+generate_geoip_summary() {
+  local total_ips=$(grep -c "IP_DISCOVERED" geo-ip-log.txt 2>/dev/null || echo 0)
+  local successful_lookups=$(grep -c "LOOKUP_SUCCESS" geo-ip-log.txt 2>/dev/null || echo 0)
+  local failed_lookups=$(grep -c "LOOKUP_FAILED" geo-ip-log.txt 2>/dev/null || echo 0)
+  local skipped_lookups=$(grep -c "LOOKUP_SKIPPED" geo-ip-log.txt 2>/dev/null || echo 0)
+  
+  {
+    echo "=== GEOIP SESSION SUMMARY ==="
+    echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Total IPs discovered: $total_ips"
+    echo "Successful lookups: $successful_lookups"
+    echo "Failed lookups: $failed_lookups"
+    echo "Skipped lookups: $skipped_lookups"
+    echo "Success rate: $(awk -v s="$successful_lookups" -v t="$total_ips" 'BEGIN{if(t>0) printf "%.1f%%", (s/t)*100; else print "N/A"}')"
+    echo "=========================="
+  } >> geo-ip-log.txt
+}
+
+
+# === Enhanced Deep Analysis Function ===
+deep_analysis() {
+  local f="$1"
+  local flagged=false
+  local strings
+  local evidence_log="$evidence_dir/evidence_$(basename "$f")_${timestamp}.txt"
+  
+  # Check if rabin2 is available
+  if ! command -v rabin2 >/dev/null 2>&1; then
+    echo "[!] rabin2 not found - limited analysis for $(basename "$f")"
+    echo "RABIN2_MISSING: Limited analysis performed" >> "$evidence_log"
+    return 1
+  fi
+  
+  strings=$(safe_rabin2_strings "$f")
+  
+  echo "[*] Analysis of: $(basename "$f")"
+  echo "Evidence Log: $evidence_log" > "$evidence_log"
+  echo "Binary: $f" >> "$evidence_log"
+  echo "Timestamp: $(date)" >> "$evidence_log"
+  echo "----------------------------------------" >> "$evidence_log"
+
+
+  # === Enhanced Behavioral Patterns with Evidence ===
+  
+  if check_pattern_with_evidence "$strings" 'bash -c|curl.*http|wget.*http|eval.*\(|python -c|perl -e|powershell' "Remote code execution pattern" "[!]" 3; then
+    flagged=true
+    echo "RCE_PATTERN: $(echo "$strings" | grep -Ei 'bash -c|curl.*http|wget.*http|eval.*\(|python -c|perl -e|powershell' | head -3)" >> "$evidence_log"
+  fi
+
+
+    if check_pattern_with_evidence "$strings" 'PK\\x03\\x04|\\x1f\\x8b|BZh|Rar!\\x1a\\x07|ustar' "Archive file detected" "[·]" 1; then
+    flagged=true
+    echo "ARCHIVE_MARKER: Found embedded ZIP/APK signature" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'gopclntab|go\.buildid|runtime\.main' "Golang binary detected" "[·]" 2; then
+    flagged=true
+    echo "GOLANG_BINARY: $(echo "$strings" | grep -Ei 'gopclntab|go\.buildid|runtime\.main' | head -2)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'javax/|Servlet|\.jar|Java\.lang|java\.util' "Java classloader indicators" "[·]" 2; then
+    flagged=true
+    echo "JAVA_INDICATORS: $(echo "$strings" | grep -Ei 'javax/|Servlet|\.jar|Java\.lang|java\.util' | head -2)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'require|fetch|WebSocket|XMLHttpRequest|addEventListener' "JavaScript fetch/websocket activity" "[·]" 3; then
+    flagged=true
+    echo "JS_NETWORK: $(echo "$strings" | grep -Ei 'require\$|fetch\$|WebSocket|XMLHttpRequest|addEventListener' | head -3)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'atob|btoa|Function|setTimeout|unescape|decodeURIComponent|charCodeAt|String\.fromCharCode' "JavaScript obfuscation/dynamic eval traces" "[·]" 3; then
+    flagged=true
+    echo "JS_OBFUSCATION: $(echo "$strings" | grep -Ei 'atob\$|btoa\$|Function\$|setTimeout\$|unescape|decodeURIComponent|charCodeAt\$|String\.fromCharCode' | head -3)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'eval.*Function.*atob' "Nested eval(Function(atob(...))) — staged JS loader" "[!]" 1; then
+    flagged=true
+    echo "STAGED_JS_LOADER: $(echo "$strings" | grep -Ei 'eval\$.*Function\$.*atob\$' | head -1)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'SELECT .* FROM|db\.drop|INSERT INTO|mongo|sqlite3\.open|leveldb|CREATE TABLE' "SQL/NoSQL DB usage or implant structure" "[·]" 3; then
+    flagged=true
+    echo "DATABASE_USAGE: $(echo "$strings" | grep -Ei 'SELECT .* FROM|db\.drop\$|INSERT INTO|mongo|sqlite3\.open|leveldb|CREATE TABLE' | head -3)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'aws_access_key|s3\.amazonaws\.com|authorization: bearer|x-api-key' "Cloud token or credential leakage" "[·]" 2; then
+    flagged=true
+    echo "CLOUD_CREDENTIALS: $(echo "$strings" | grep -Ei 'aws_access_key|s3\.amazonaws\.com|authorization: bearer|x-api-key' | head -2)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{35}' "AWS/GCP-style credential detected" "[!]" 1; then
+    flagged=true
+    echo "HARDCODED_KEYS: $(echo "$strings" | grep -Eio 'AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{35}' | head -1)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'TLS[_ ]?1\.[0-3]|ssl[_ ]?3\.0|cert|handshake|https://' "TLS handshake/static HTTPS hints" "[·]" 3; then
+    flagged=true
+    echo "TLS_INDICATORS: $(echo "$strings" | grep -Ei 'TLS[_ ]?1\.[0-3]|ssl[_ ]?3\.0|cert|handshake|https://' | head -3)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'password=|passwd=|token=|auth[_-]?key|PRIVATE KEY|BEGIN RSA PRIVATE KEY|secret=' "Hardcoded credentials or auth secrets" "[!]" 2; then
+    flagged=true
+    echo "HARDCODED_SECRETS: $(echo "$strings" | grep -Ei 'password=|passwd=|token=|auth[_-]?key|PRIVATE KEY|BEGIN RSA PRIVATE KEY|secret=' | head -2)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'vbox|vmware|qemu|sandbox|wine_get_unix_file_name|isDebuggerPresent|NtQueryInformationProcess' "Virtualization/sandbox detection routines" "[!]" 2; then
+    flagged=true
+    echo "EVASION_TECHNIQUES: $(echo "$strings" | grep -Ei 'vbox|vmware|qemu|sandbox|wine_get_unix_file_name|isDebuggerPresent|NtQueryInformationProcess' | head -2)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'AppData|\\Temp\\|/tmp/|/var/tmp|ProgramData|C:\\Users\\Public' "Drop zone or temp staging paths found" "[·]" 3; then
+    flagged=true
+    echo "DROP_ZONES: $(echo "$strings" | grep -Ei 'AppData|\\Temp\\|/tmp/|/var/tmp|ProgramData|C:\\Users\\Public' | head -3)" >> "$evidence_log"
+  fi
+
+
+  if check_pattern_with_evidence "$strings" 'checkin|heartbeat|command server|beacon interval|tasking server|poll frequency' "C2 beaconing or persistence loop markers" "[·]" 2; then
+    flagged=true
+    echo "C2_INDICATORS: $(echo "$strings" | grep -Ei 'checkin|heartbeat|command server|beacon interval|tasking server|poll frequency' | head -2)" >> "$evidence_log"
+  fi
+
+
+  # === Enhanced Base64 Detection with Evidence ===
+  echo "  [·] Base64 Analysis:"
+  base64_candidates=$(echo "$strings" | grep -Eo '[A-Za-z0-9+/=]{16,}' | grep -E '^([A-Za-z0-9+/]{4})+$' | sort | uniq -c | sort -nr | head -5)
+  
+  if [ -n "$base64_candidates" ]; then
+    echo "$base64_candidates" | while read -r count chunk; do
+      echo "  [·] Possible base64 string detected ($count): ${chunk:0:32}..."
+      echo "      ↳ Full string: $chunk"
+      # Try to decode and show if it's readable
+      decoded=$(echo "$chunk" | base64 -d 2>/dev/null | tr -cd '[:print:]' | head -c 50)
+      [ -n "$decoded" ] && echo "      ↳ Decoded preview: $decoded..."
+      flagged=true
+    done
+    echo "BASE64_CANDIDATES: $base64_candidates" >> "$evidence_log"
+  fi
+
+
+  detect_base64_blobs "$strings"
+
+
+  # === IP Address Extraction with Context ===
+  echo "  [·] Embedded IP Analysis:"
+  ip_context=$(echo "$strings" | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -5)
+  if [ -n "$ip_context" ]; then
+    echo "$ip_context" | while IFS= read -r line; do
+      ips=$(echo "$line" | grep -Eo '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b')
+      echo "      ↳ Context: ${line:0:60}..."
+      for ip in $ips; do
+        echo "      ↳ IP found: $ip"
+        $geoip_mode && enhanced_arin_lookup "$ip" "$f"
+      done
+    done
+    echo "IP_CONTEXT: $ip_context" >> "$evidence_log"
+    flagged=true
+  fi
+
+
+
+
+  # Enhanced entropy analysis
+  comprehensive_entropy_analysis "$f" "$evidence_log"
+  local entropy_threat=$?
+  
+  if [ $entropy_threat -ge 2 ]; then
+    flagged=true
+    echo "HIGH_ENTROPY_DETECTED: Threat level $entropy_threat" >> "$evidence_log"
+  fi
+
+
+  # === ELF Metadata ===
+  echo "  [·] ELF Metadata:"
+  rabin2 -I "$f" 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      arch*)     echo "     • Architecture: $(echo "$line" | cut -d' ' -f2-)" ;;
+      bits*)     echo "     • Bits: $(echo "$line" | cut -d' ' -f2-)" ;;
+      bintype*)  echo "     • Binary Type: $(echo "$line" | cut -d' ' -f2-)" ;;
+      class*)    echo "     • Class: $(echo "$line" | cut -d' ' -f2-)" ;;
+      lang*)     echo "     • Language: $(echo "$line" | cut -d' ' -f2-)" ;;
+      machine*)  echo "     • Machine: $(echo "$line" | cut -d' ' -f2-)" ;;
+      os*)       echo "     • OS: $(echo "$line" | cut -d' ' -f2-)" ;;
+      pic*)      echo "     • PIC: $(echo "$line" | cut -d' ' -f2-)" ;;
+      static*)   echo "     • Static: $(echo "$line" | cut -d' ' -f2-)" ;;
+      stripped*) echo "     • Stripped: $(echo "$line" | cut -d' ' -f2-)" ;;
+    esac
+  done
+
+
+  # === Syscall Analysis ===
+  syscall_dump=$(rabin2 -x "$f" 2>/dev/null || echo "")
+  if [ -n "$syscall_dump" ]; then
+    syscalls=$(echo "$syscall_dump" | grep -Eoi 'execve?|ptrace|chmod|socket|clone|kill|fork|open|mprotect|prctl|connect')
+    syscall_hits=$(echo "$syscalls" | sort | uniq -c | sort -nr)
+    syscall_count=$(echo "$syscalls" | wc -l)
+
+
+    if [ "$syscall_count" -ge 6 ]; then
+      echo "  [!] High syscall density ($syscall_count):"
+      echo "$syscall_hits" | awk '{printf "     ▸ %s (%s)\n", $2, $1}'
+      echo "HIGH_SYSCALL_DENSITY: $syscall_hits" >> "$evidence_log"
+      flagged=true
+    elif [ "$syscall_count" -ge 2 ]; then
+      echo "  [·] Moderate syscall activity ($syscall_count):"
+      echo "$syscall_hits" | awk '{printf "     • %s (%s)\n", $2, $1}'
+      echo "MODERATE_SYSCALL_ACTIVITY: $syscall_hits" >> "$evidence_log"
+      flagged=true
+    fi
+  else
+    echo "  [·] Syscall dump unavailable (rabin2 -x failed)"
+  fi
+
+
+  # === Final Verdict with Evidence Summary ===
+  if $flagged; then
+    echo -e "⚠️  Threat indicators flagged in: $(basename "$f")"
+    echo "    ↳ Evidence log: $evidence_log"
+    echo "    ↳ Review with: less $evidence_log"
+    
+    # Copy evidence to main forensics log
+    echo "=== EVIDENCE FOR $(basename "$f") ===" >> "$forensics_log"
+    cat "$evidence_log" >> "$forensics_log"
+    echo "" >> "$forensics_log"
+  else
+    rm -f "$evidence_log"  # Clean up if no threats found
+  fi
+}
+
+
+# == Enhanced Binary Analysis ==
+scan_binary() {
+  local file="$1"
+  echo "[*] Analyzing: $(basename "$file")"
+  
+  # Check if rabin2 is available
+  if command -v rabin2 >/dev/null 2>&1; then
+    rabin2 -I "$file" 2>/dev/null | grep -E 'arch|type|entry|binsz' | sed 's/^/  /'
+  else
+    echo "  rabin2 not available - using basic file analysis"
+    file "$file" | sed 's/^/  /'
+  fi
+  
+  echo "  SHA256: $(sha256sum "$file" | awk '{print $1}')"
+
+
+  # Enhanced IP extraction with proper logging
+  local ip_count=0
+  if command -v rabin2 >/dev/null 2>&1; then
+    safe_rabin2_strings "$file" | grep -Eo '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' | sort -u | while read -r ip; do
+      echo "  IP: $ip"
+      ip_count=$((ip_count + 1))
+      log_geoip_activity "$ip" "$file" "FOUND" "Extracted from binary strings"
+      if $geoip_mode; then
+        enhanced_arin_lookup "$ip" "$file"
+      else
+        log_geoip_activity "$ip" "$file" "SKIPPED" "GeoIP mode disabled"
+      fi
+    done
+  else
+    # Fallback: use strings command if rabin2 is not available
+    strings "$file" 2>/dev/null | grep -Eo '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' | sort -u | while read -r ip; do
+      echo "  IP: $ip (via strings fallback)"
+      ip_count=$((ip_count + 1))
+      log_geoip_activity "$ip" "$file" "FOUND" "Extracted via strings fallback"
+      if $geoip_mode; then
+        enhanced_arin_lookup "$ip" "$file"
+      else
+        log_geoip_activity "$ip" "$file" "SKIPPED" "GeoIP mode disabled"
+      fi
+    done
+  fi
+  
+  # Log if no IPs were found
+  if [ "$ip_count" -eq 0 ]; then
+    echo "[*] No IP addresses found in $(basename "$file")" >> geo-ip-log.txt
+  fi
+}
+
+
+# == Hashing ==
+generate_hashmap() {
+  echo "[*] Hashing Termux executables..."
+  find "$PREFIX"/bin -type f -executable 2>/dev/null | while read -r f; do
+    sha256sum "$f"
+  done > "$hash_log"
+}
+
+
+hash_forensic_logs() {
+  echo "[*] Verifying log integrity..."
+  for log in "$descriptions_log" "$system_log" "$forensics_log" "$forensics_sys_log" arin-intel.txt threat-indicators.txt; do
+    [ -f "$log" ] && sha256sum "$log" >> "integrity_${timestamp}.txt"
+  done
+}
+
+
+# == Enhanced ARIN Threat Intel with Proper GeoIP Logging ==
+enhanced_arin_lookup() {
+  local ip="$1"
+  local binary="$2"
+  local sha256=$(sha256sum "$binary" 2>/dev/null | awk '{print $1}' || echo "N/A")
+  local score=0
+  local ptr=""
+  local out="Timestamp: $(date '+%Y-%m-%d %H:%M:%S')\nFile: $(basename "$binary")\nSHA256: $sha256\nIP: $ip"
+
+
+  # Log IP discovery
+  log_geoip_activity "$ip" "$binary" "FOUND" "Extracted from binary"
+
+
+  # Check for special/reserved IP ranges first
+  local ip_type=""
+  case "$ip" in
+    127.*) ip_type="LOOPBACK-LOCALHOST" ;;
+    10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*) ip_type="PRIVATE-RFC1918" ;;
+    169.254.*) ip_type="LINK-LOCAL-APIPA" ;;
+    224.*|225.*|226.*|227.*|228.*|229.*|230.*|231.*|232.*|233.*|234.*|235.*|236.*|237.*|238.*|239.*) ip_type="MULTICAST" ;;
+    0.0.0.0) ip_type="NULL-ROUTE" ;;
+    255.255.255.255) ip_type="BROADCAST" ;;
+    192.0.2.*|198.51.100.*|203.0.113.*) ip_type="TEST-NET-RFC5737" ;;
+    198.18.*|198.19.*) ip_type="BENCHMARK-RFC2544" ;;
+    240.*|241.*|242.*|243.*|244.*|245.*|246.*|247.*|248.*|249.*|250.*|251.*|252.*|253.*|254.*|255.*) ip_type="RESERVED-EXPERIMENTAL" ;;
+  esac
+
+
+  if [ -n "$ip_type" ]; then
+    out="$out\nIP Type: $ip_type"
+    out="$out\nStatus: SPECIAL/RESERVED - No external lookup needed"
+    out="$out\nThreat Level: BENIGN (Internal/Reserved)"
+    echo -e "$out\nScore: 0 (Reserved IP)\n" >> arin-intel.txt
+    
+    # Log skipped lookup with reason
+    log_geoip_activity "$ip" "$binary" "SKIPPED" "$ip_type (Reserved/Private IP)"
+    
+    echo "[*] Special IP detected: $ip ($ip_type) - skipping WHOIS lookup" >> whois_debug.log
+    return 0
+  fi
+
+
+  # Attempt WHOIS lookup for public IPs
+  echo "[*] Performing WHOIS lookup for $ip..." >> geo-ip-log.txt
+  
+  local whois_out
+  local lookup_success=false
+  
+  # Try multiple WHOIS servers for better coverage
+  local whois_servers=("whois.arin.net" "whois.ripe.net" "whois.apnic.net")
+  
+  for server in "${whois_servers[@]}"; do
+    echo "[*] Trying WHOIS server: $server for $ip" >> geo-ip-log.txt
+    whois_out=$(timeout 10 whois -h "$server" "$ip" 2>/dev/null)
+    
+    if [ -n "$whois_out" ] && ! echo "$whois_out" | grep -qi "no match\|not found\|no entries found"; then
+      lookup_success=true
+      log_geoip_activity "$ip" "$binary" "LOOKUP_SUCCESS" "Retrieved from $server"
+      break
+    else
+      echo "[*] No data from $server for $ip" >> geo-ip-log.txt
+    fi
+  done
+
+
+  # If all WHOIS servers failed, try alternative methods
+  if [ "$lookup_success" = false ]; then
+    echo "[*] All WHOIS servers failed, trying alternative lookup for $ip" >> geo-ip-log.txt
+    
+    # Try basic whois without specific server
+    whois_out=$(timeout 10 whois "$ip" 2>/dev/null)
+    
+    if [ -n "$whois_out" ] && ! echo "$whois_out" | grep -qi "no match\|not found\|no entries found"; then
+      lookup_success=true
+      log_geoip_activity "$ip" "$binary" "LOOKUP_SUCCESS" "Retrieved from default whois"
+    else
+      log_geoip_activity "$ip" "$binary" "LOOKUP_FAILED" "All WHOIS servers returned no data"
+      
+      # Still create a basic entry
+      out="$out\nStatus: WHOIS lookup failed"
+      out="$out\nThreat Level: UNKNOWN (No WHOIS data available)"
+      echo -e "$out\nScore: 1 (Unknown - lookup failed)\n" >> arin-intel.txt
+      return 1
+    fi
+  fi
+
+
+  # Log raw WHOIS response for forensic trace
+  {
+    echo "[*] WHOIS response for $ip"
+    echo "$whois_out"
+    echo ""
+  } >> whois_debug.log
+
+
+  # Enhanced field extraction with multi-RIR support
+  local org=$(echo "$whois_out" | grep -Ei '^OrgName|^organisation|^Organization|^org-name' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local net=$(echo "$whois_out" | grep -Ei '^netname|^NetName' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local country=$(echo "$whois_out" | grep -Ei '^country' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local abuse=$(echo "$whois_out" | grep -Ei '^AbuseEmail|^abuse-mailbox|^e-mail.*abuse' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  
+  # Log extracted key information to geo-ip-log.txt
+  {
+    echo "[*] Extracted data for $ip:"
+    echo "    Organisation: ${org:-N/A}"
+    echo "    Country: ${country:-N/A}"
+    echo "    NetName: ${net:-N/A}"
+    echo "    Abuse Contact: ${abuse:-N/A}"
+  } >> geo-ip-log.txt
+
+
+  # Additional enhanced fields
+  local org_type=$(echo "$whois_out" | grep -Ei '^org-type|^OrgType' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local address=$(echo "$whois_out" | grep -Ei '^address|^Address' | sed -n 's/.*:[[:space:]]*//p' | head -3 | tr '\n' ', ' | sed 's/, $//')
+  local email=$(echo "$whois_out" | grep -Ei '^e-mail|^Email' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local mnt_ref=$(echo "$whois_out" | grep -Ei '^mnt-ref' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local mnt_by=$(echo "$whois_out" | grep -Ei '^mnt-by' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local last_modified=$(echo "$whois_out" | grep -Ei '^last-modified|^Updated' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local source=$(echo "$whois_out" | grep -Ei '^source|^Source' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local descr=$(echo "$whois_out" | grep -Ei '^descr|^Description' | sed -n 's/.*:[[:space:]]*//p' | head -2 | tr '\n' ' ')
+  local netrange=$(echo "$whois_out" | grep -Ei '^NetRange|^inetnum' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  local cidr=$(echo "$whois_out" | grep -Ei '^CIDR' | sed -n 's/.*:[[:space:]]*//p' | head -1)
+  
+  # Check for referral to other RIRs
+  local referral=$(echo "$whois_out" | grep -Ei 'refer to|ReferralServer|whois\.' | head -1)
+  
+  # Build enhanced output for arin-intel.txt
+  [ -n "$org" ] && out="$out\nOrganisation: $org"
+  [ -n "$org_type" ] && out="$out\nOrg-Type: $org_type"
+  [ -n "$net" ] && out="$out\nNetName: $net"
+  [ -n "$country" ] && out="$out\nCountry: $country"
+  [ -n "$address" ] && out="$out\nAddress: $address"
+  [ -n "$email" ] && out="$out\nE-mail: $email"
+  [ -n "$abuse" ] && out="$out\nAbuse Contact: $abuse"
+  [ -n "$descr" ] && out="$out\nDescription: $descr"
+  [ -n "$netrange" ] && out="$out\nNet Range: $netrange"
+  [ -n "$cidr" ] && out="$out\nCIDR: $cidr"
+  [ -n "$mnt_ref" ] && out="$out\nMnt-Ref: $mnt_ref"
+  [ -n "$mnt_by" ] && out="$out\nMnt-By: $mnt_by"
+  [ -n "$last_modified" ] && out="$out\nLast-Modified: $last_modified"
+  [ -n "$source" ] && out="$out\nSource: $source"
+  [ -n "$referral" ] && out="$out\nReferral: $referral"
+
+
+  # Enhanced threat scoring with more indicators
+  local threat_indicators=""
+  
+  # Cloud/VPS providers (higher risk for malware hosting)
+  if [[ "$org" =~ (ovh|m247|digitalocean|proton|linode|netcup|hetzner|vultr|scaleway|contabo) ]]; then
+    score=$((score + 5))
+    threat_indicators="$threat_indicators CLOUD/VPS-PROVIDER"
+  fi
+  
+  # VPN/Proxy indicators
+  if [[ "$net" =~ (proxy|vpn|mask|anony|tor) ]] || [[ "$descr" =~ (proxy|vpn|anonymous) ]]; then
+    score=$((score + 3))
+    threat_indicators="$threat_indicators VPN/PROXY"
+  fi
+  
+  # High-risk countries
+  if [[ "$country" =~ ^(CN|RU|IR|KP|BY|PK)$ ]]; then
+    score=$((score + 2))
+    threat_indicators="$threat_indicators HIGH-RISK-COUNTRY"
+  fi
+  
+  # Suspicious organization types
+  if [[ "$org_type" =~ (hosting|isp|transit) ]]; then
+    score=$((score + 1))
+    threat_indicators="$threat_indicators HOSTING/ISP"
+  fi
+  
+  # China-specific indicators
+  if [[ "$org" =~ (chinanet|china.telecom|china.unicom|china.mobile) ]] || [[ "$descr" =~ (chinanet|china.telecom) ]]; then
+    score=$((score + 3))
+    threat_indicators="$threat_indicators CHINA-TELECOM"
+  fi
+  
+  # Bulletproof hosting indicators
+  if [[ "$org" =~ (serverius|ecatel|quasi|blazingfast|hostkey) ]]; then
+    score=$((score + 8))
+    threat_indicators="$threat_indicators BULLETPROOF-HOSTING"
+  fi
+
+
+  # PTR lookup with logging
+  echo "[*] Performing PTR lookup for $ip..." >> geo-ip-log.txt
+  ptr=$(timeout 5 dig +short -x "$ip" 2>/dev/null)
+  if [ -z "$ptr" ]; then
+    out="$out\nPTR: None found"
+    score=$((score + 1))
+    threat_indicators="$threat_indicators NO-PTR"
+    echo "[!] PTR lookup failed for $ip" >> geo-ip-log.txt
+  else
+    out="$out\nPTR: $ptr"
+    echo "[*] PTR found for $ip: $ptr" >> geo-ip-log.txt
+    # Check for suspicious PTR patterns
+    if [[ "$ptr" =~ (dynamic|dhcp|pool|cable|dsl|residential) ]]; then
+      score=$((score + 2))
+      threat_indicators="$threat_indicators DYNAMIC-PTR"
+    fi
+  fi
+
+
+    # Add threat assessment
+  [ -n "$threat_indicators" ] && out="$out\nThreat Indicators:$threat_indicators"
+  
+  # Risk classification
+    risk_level="LOW"
+  if [ "$score" -ge 10 ]; then
+    risk_level="CRITICAL"
+  elif [ "$score" -ge 8 ]; then
+    risk_level="HIGH"
+  elif [ "$score" -ge 5 ]; then
+    risk_level="MEDIUM"
+  fi
+  
+  out="$out\nRisk Level: $risk_level"
+  out="$out\nThreat Score: $score"
+
+
+  # Log threat assessment to geo-ip-log.txt
+  {
+    echo "[*] Threat assessment for $ip:"
+    echo "    Risk Level: $risk_level"
+    echo "    Threat Score: $score"
+    [ -n "$threat_indicators" ] && echo "    Indicators:$threat_indicators"
+    echo "    Analysis completed at: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "    ---"
+  } >> geo-ip-log.txt
+
+
+  # Output to arin-intel.txt
+  echo -e "$out\n" >> arin-intel.txt
+
+
+  # Enhanced threat indicators file
+  if [ "$score" -ge 10 ]; then
+    echo "$ip: CRITICAL (Score $score) - $org [$threat_indicators]" >> threat-indicators.txt
+    log_geoip_activity "$ip" "$binary" "LOOKUP_SUCCESS" "CRITICAL threat detected (Score: $score)"
+  elif [ "$score" -ge 8 ]; then
+    echo "$ip: HIGH (Score $score) - $org [$threat_indicators]" >> threat-indicators.txt
+    log_geoip_activity "$ip" "$binary" "LOOKUP_SUCCESS" "HIGH threat detected (Score: $score)"
+  elif [ "$score" -ge 5 ]; then
+    echo "$ip: MEDIUM (Score $score) - $org [$threat_indicators]" >> threat-indicators.txt
+    log_geoip_activity "$ip" "$binary" "LOOKUP_SUCCESS" "MEDIUM threat detected (Score: $score)"
+  else
+    log_geoip_activity "$ip" "$binary" "LOOKUP_SUCCESS" "LOW threat (Score: $score)"
+  fi
+
+
+  return 0
+}
+
+
+# == Enhanced Finalization ==
+finalize_session_forensics() {
+  echo "[*] Generating log hashstamp..."
+  for log in "$descriptions_log" "$system_log" "$forensics_log" "$forensics_sys_log" "$hash_log" arin-intel.txt threat-indicators.txt geo-ip-log.txt; do
+    [ -f "$log" ] && sha256sum "$log" >> "log_integrity_stamp_$timestamp.txt"
+  done
+
+
+  # Hash evidence files
+  if [ -d "$evidence_dir" ]; then
+    find "$evidence_dir" -name "*.txt" -exec sha256sum {} \; >> "evidence_integrity_stamp_$timestamp.txt"
+    echo "[*] Evidence integrity hashes: evidence_integrity_stamp_$timestamp.txt"
+  fi
+
+
+  echo "[*] Snapshot stored: $hash_log"
+  echo "[*] Logs: descriptions, forensics, threats, geo-ip"
+
+
+  # Enhanced display view
+  if $display_view; then
+    echo "[*] Opening logs for review..."
+    less "$descriptions_log" "$forensics_log" "$forensics_sys_log" arin-intel.txt threat-indicators.txt geo-ip-log.txt 2>/dev/null
+
+
+    # Ask if user wants to review evidence files
+    if [ -d "$evidence_dir" ] && [ "$(find "$evidence_dir" -name "*.txt" | wc -l)" -gt 0 ]; then
+      echo -n "Review evidence files? [y/N]: "
+      read -r response
+      case "$response" in
+        [yY]|[yY][eE][sS]) find "$evidence_dir" -name "*.txt" -exec less {} + ;;
+      esac
+    fi
+  fi
+
+
+  # Display GeoIP summary if available
+  if [ -f "geo-ip-log.txt" ] && [ -s "geo-ip-log.txt" ]; then
+    echo "[*] GeoIP Analysis Summary:"
+    tail -10 geo-ip-log.txt | grep -E "Total IPs|Success rate|Successful lookups"
+  fi
+}
+
+
+# == Evidence Analysis Helper ==
+analyze_evidence_summary() {
+  if [ ! -d "$evidence_dir" ]; then
+    echo "[*] No evidence directory found"
+    return
+  fi
+
+
+  echo "[*] Evidence Summary:"
+  echo "    Total evidence files: $(find "$evidence_dir" -name "*.txt" | wc -l)"
+
+
+  # Count evidence types
+  echo "    Evidence breakdown:"
+  grep -h "^[A-Z_]*:" "$evidence_dir"/*.txt 2>/dev/null | cut -d: -f1 | sort | uniq -c | sort -nr | while read -r count type; do
+    echo "      $type: $count occurrences"
+  done
+
+
+  # High-risk evidence
+  high_risk=$(grep -l "HARDCODED_KEYS\|STAGED_JS_LOADER\|EVASION_TECHNIQUES\|RCE_PATTERN" "$evidence_dir"/*.txt 2>/dev/null | wc -l)
+  if [ "$high_risk" -gt 0 ]; then
+    echo -e "    ${RED}High-risk evidence found in $high_risk files${NC}"
+  fi
+}
+
+
+# == Main Execution Function ==
+main() {
+  echo -e "${PURPLE}###  - GET DESCRIPTIONS Digital Recon & Forensics on Digital Ecosystems :: 1Lab, Code Transparency Intent${NC}"
+  
+  # Install dependencies first (includes bc and rabin2 checks)
+  install_dependencies
+  
+  # Verify critical tools are available
+  local missing_tools=()
+  command -v rabin2 >/dev/null 2>&1 || missing_tools+=("rabin2")
+  command -v bc >/dev/null 2>&1 || missing_tools+=("bc")
+  
+  if [ ${#missing_tools[@]} -gt 0 ]; then
+    echo -e "${YELLOW}[!] Warning: Missing tools: ${missing_tools[*]}${NC}"
+    echo "[!] Some analysis features may be limited"
+  fi
+  
+  # Initialize GeoIP logging
+  if $geoip_mode; then
+    echo "[*] GeoIP Analysis Session Started: $(date '+%Y-%m-%d %H:%M:%S')" > geo-ip-log.txt
+    echo "[*] GeoIP mode enabled - IP lookups will be performed" >> geo-ip-log.txt
+  else
+    echo "[*] GeoIP Analysis Session Started: $(date '+%Y-%m-%d %H:%M:%S')" > geo-ip-log.txt
+    echo "[*] GeoIP mode disabled - IPs will be logged but not looked up" >> geo-ip-log.txt
+  fi
+  
+  # Package description analysis - runs by default in simple mode
+  echo "[*] Analyzing installed packages..."
+  pkg list-installed | cut -d/ -f1 | while read -r package_name; do
+      get_description "$package_name" "$show_dependencies" "$show_extended"
+  done
+  
+  echo "[*] Analyzing Python packages..."
+  list_python_packages
+  
+  # Create evidence directory
+  echo "[*] Creating evidence directory: $evidence_dir"
+  mkdir -p "$evidence_dir"
+
+
+  if $log_all; then
+    $log_desc && parse_descriptions "$show_extended" "$quiet"
+    if $log_sys; then
+      scan_system_libraries >> "$system_log"
+      scan_proot_pkgs >> "$system_log"
+    fi
+  fi
+
+
+  if $memwatch_mode; then
+    echo "[*] Running memory snapshot analysis..."
+    memwatch_analysis
+  fi
+
+
+  if $do_r2scan && $log_all; then
+    echo "[*] Termux ELF scan..."
+    
+    # Use process substitution to avoid subshell variable issues
+    termux_scanned=0
+    termux_threats=0
+    
+    while IFS= read -r f; do
+      echo "[$(basename "$f")]" >> "$forensics_log"
+      scan_binary "$f" >> "$forensics_log"
+      
+      # Enhanced deep analysis with entropy integration
+      deep_analysis "$f" >> "$forensics_log"
+      termux_scanned=$((termux_scanned + 1))
+      
+      # Check if threats were flagged (look for ⚠️ in the last analysis)
+      if tail -50 "$forensics_log" | grep -q "⚠️"; then
+        termux_threats=$((termux_threats + 1))
+      fi
+    done < <(find "$PREFIX"/bin -type f -executable 2>/dev/null)
+    
+    echo "[*] Termux scan completed: $termux_scanned files analyzed, $termux_threats threats detected"
+
+
+    echo "[*] System ELF scan..."
+    system_scanned=0
+    system_threats=0
+    
+    while IFS= read -r f; do
+      echo "[$(basename "$f")]" >> "$forensics_sys_log"
+      scan_binary "$f" >> "$forensics_sys_log"
+      
+      # Enhanced deep analysis with entropy integration
+      deep_analysis "$f" >> "$forensics_sys_log"
+      system_scanned=$((system_scanned + 1))
+      
+      # Check if threats were flagged
+      if tail -50 "$forensics_sys_log" | grep -q "⚠️"; then
+        system_threats=$((system_threats + 1))
+      fi
+    done < <(find /system/lib* /vendor/lib* /apex/*/lib* -type f -name "*.so*" 2>/dev/null)
+    
+    echo "[*] System scan completed: $system_scanned files analyzed, $system_threats threats detected"
+  fi
+
+
+  if $log_all; then
+    generate_hashmap
+    hash_forensic_logs
+    finalize_session_forensics
+  fi
+
+
+  # === Enhanced Evidence Summary ===
+  evidence_count=$(find "$evidence_dir" -name "*.txt" 2>/dev/null | wc -l)
+  if [ "$evidence_count" -gt 0 ]; then
+    echo "[*] Evidence files created: $evidence_count"
+    echo "[*] Evidence directory: $evidence_dir"
+    echo "[*] Review evidence with: find $evidence_dir -name '*.txt' -exec less {} +"
+    
+    # Count entropy threats specifically
+    entropy_critical=$(grep -c "ENTROPY_CRITICAL" "$evidence_dir"/*.txt 2>/dev/null || echo 0)
+    entropy_high=$(grep -c "ENTROPY_HIGH" "$evidence_dir"/*.txt 2>/dev/null || echo 0)
+    entropy_medium=$(grep -c "ENTROPY_MEDIUM" "$evidence_dir"/*.txt 2>/dev/null || echo 0)
+    
+    if [ "$entropy_critical" -gt 0 ] || [ "$entropy_high" -gt 0 ]; then
+      echo -e "${RED}[!] Entropy Threats: $entropy_critical critical, $entropy_high high, $entropy_medium medium${NC}"
+    fi
+  fi
+
+
+  analyze_evidence_summary
+
+
+# === Enhanced Session Threat Summary ===
+scanned=0
+threats=0
+
+
+# Count analyzed files by looking for file headers in brackets
+[ -f "$forensics_log" ] && scanned=$((scanned + $(grep -c '^\[.*\]$' "$forensics_log" 2>/dev/null || echo 0)))
+[ -f "$forensics_sys_log" ] && scanned=$((scanned + $(grep -c '^\[.*\]$' "$forensics_sys_log" 2>/dev/null || echo 0)))
+
+
+# Count threat indicators (warning emoji)
+[ -f "$forensics_log" ] && threats=$((threats + $(grep -c '⚠️' "$forensics_log" 2>/dev/null || echo 0)))
+[ -f "$forensics_sys_log" ] && threats=$((threats + $(grep -c '⚠️' "$forensics_sys_log" 2>/dev/null || echo 0)))
+
+
+# Enhanced percentage calculation with bc availability check
+percent="0.0"
+if [ "$scanned" -gt 0 ]; then
+  if command -v bc >/dev/null 2>&1; then
+    percent=$(echo "scale=1; ($threats * 100) / $scanned" | bc -l)
+  else
+    # Fallback to awk if bc is not available
+    percent=$(awk -v t="$threats" -v s="$scanned" 'BEGIN {printf "%.1f", (t/s)*100}')
+  fi
+fi
+
+
+# Enhanced risk assessment with bc/awk fallback
+color="$GREEN"
+status="Low"
+if command -v bc >/dev/null 2>&1; then
+  if (( $(echo "$percent >= 5" | bc -l) )); then color="$YELLOW"; status="Medium"; fi
+  if (( $(echo "$percent >= 20" | bc -l) )); then color="$RED"; status="High"; fi
+else
+  # Awk fallback for comparison
+  if awk -v p="$percent" 'BEGIN {exit !(p >= 5)}'; then color="$YELLOW"; status="Medium"; fi
+  if awk -v p="$percent" 'BEGIN {exit !(p >= 20)}'; then color="$RED"; status="High"; fi
+fi
+
+
+echo -e "\n${color}[$status Risk]${NC} Threat Trigger Ratio: ${color}$percent%${NC} of scanned binaries flagged ($threats/$scanned)"
+
+
+# Additional entropy-specific summary
+if $do_r2scan && [ "$evidence_count" -gt 0 ]; then
+  echo "[*] Run 'grep ENTROPY_ $evidence_dir/*.txt' to review entropy-based detections"
+fi
+
+
+# GeoIP session summary
+if $geoip_mode && [ -f "geo-ip-log.txt" ]; then
+  total_ips=$(grep -c "IP_DISCOVERED" geo-ip-log.txt 2>/dev/null || echo 0)
+  successful_lookups=$(grep -c "LOOKUP_SUCCESS" geo-ip-log.txt 2>/dev/null || echo 0)
+  echo "[*] GeoIP Summary: $total_ips IPs discovered, $successful_lookups successful lookups"
+fi
+}
+
+
+# == Enhanced Finalization with GeoIP Summary ==
+finalize_session_forensics() {
+  echo "[*] Generating log hashstamp..."
+  for log in "$descriptions_log" "$system_log" "$forensics_log" "$forensics_sys_log" "$hash_log" arin-intel.txt threat-indicators.txt geo-ip-log.txt; do
+    [ -f "$log" ] && sha256sum "$log" >> "log_integrity_stamp_$timestamp.txt"
+  done
+
+
+  # Generate GeoIP session summary
+  if $geoip_mode; then
+    echo "[*] Generating GeoIP session summary..."
+    generate_geoip_summary
+  fi
+
+
+  # Hash evidence files
+  if [ -d "$evidence_dir" ]; then
+    find "$evidence_dir" -name "*.txt" -exec sha256sum {} \; >> "evidence_integrity_stamp_$timestamp.txt"
+    echo "[*] Evidence integrity hashes: evidence_integrity_stamp_$timestamp.txt"
+  fi
+
+
+  echo "[*] Snapshot stored: $hash_log"
+  echo "[*] Logs: descriptions, forensics, threats, geo-ip"
+  
+  # Enhanced display view with GeoIP log
+  if $display_view; then
+    echo "[*] Opening logs for review..."
+    less "$descriptions_log" "$forensics_log" "$forensics_sys_log" arin-intel.txt threat-indicators.txt geo-ip-log.txt 2>/dev/null
+    
+    # Ask if user wants to review evidence files
+    if [ -d "$evidence_dir" ] && [ "$(find "$evidence_dir" -name "*.txt" | wc -l)" -gt 0 ]; then
+      echo -n "Review evidence files? [y/N]: "
+      read -r response
+      case "$response" in
+        [yY]|[yY][eE][sS]) find "$evidence_dir" -name "*.txt" -exec less {} + ;;
+      esac
+    fi
+  fi
+
+
+  # Display GeoIP summary if available
+  if [ -f "geo-ip-log.txt" ] && [ -s "geo-ip-log.txt" ]; then
+    echo "[*] GeoIP Analysis Summary:"
+    tail -10 geo-ip-log.txt | grep -E "Total IPs|Success rate|Successful lookups"
+  fi
+}
+
+
+# Run the main function
+main "$@"
