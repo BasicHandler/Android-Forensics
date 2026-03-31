@@ -38,10 +38,15 @@ def cleanse_vcf_lines(lines):
         stripped = line.strip()
         if not stripped: continue
 
-        # 1. Bit-Rot Guard: Kill orphaned fragments (broken Base64/orphaned data)
-        if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
-            stats["bit_rot_purged"] += 1
-            continue
+        # 1 Updated Bit-Rot Guard in cleanse_vcf_lines:
+if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
+    # If the line starts with whitespace, it's a continuation, not rot
+    if line.startswith((' ', '\t')):
+        cleansed_lines.append(line)
+        continue
+    stats["bit_rot_purged"] += 1
+    continue
+
 
         # 2. Structural Lock: Handle BEGIN/END and force RFC 6350 (v3.0)
         if stripped.startswith('BEGIN:VCARD'):
