@@ -26,7 +26,7 @@ def cleanse_vcf_lines(lines):
         "bit_rot_purged": 0,   # Corrupted Base64/fragments
         "audit_log": []
     }
-    
+
     # Comprehensive Proscribed Lists
     PROSCRIBED_PREFIXES = ('X-', 'GOOGLE-', 'X-MS-', 'X-SAMSUNG-', 'X-PHONETIC-')
     PROSCRIBED_KEYS = ('UID', 'REV', 'PRODID', 'PHOTO', 'VERSION')
@@ -40,12 +40,12 @@ def cleanse_vcf_lines(lines):
 
         # 1 Updated Bit-Rot Guard in cleanse_vcf_lines:
 if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
-    # If the line starts with whitespace, it's a continuation, not rot
-    if line.startswith((' ', '\t')):
+        # If the line starts with whitespace, it's a continuation, not rot
+        if line.startswith((' ', '\t')):
         cleansed_lines.append(line)
         continue
     stats["bit_rot_purged"] += 1
-    continue
+        continue
 
 
         # 2. Structural Lock: Handle BEGIN/END and force RFC 6350 (v3.0)
@@ -70,12 +70,12 @@ if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
             full_key = stripped.split(':', 1)[0].upper()
             # Handle property parameters (split by semicolon)
             base_key = full_key.split(';', 1)[0]
-            
+
             if any(base_key.startswith(p) for p in PROSCRIBED_PREFIXES):
                 stats["stripped_vendor"] += 1
                 stats["audit_log"].append(f"REMOVED_VENDOR_EXT: {base_key}")
                 continue
-                
+
             if base_key in PROSCRIBED_KEYS:
                 stats["stripped_keys"] += 1
                 stats["audit_log"].append(f"REMOVED_ID: {base_key}")
@@ -83,7 +83,7 @@ if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
 
         # Final keep: Ensure newline consistency
         cleansed_lines.append(line if line.endswith('\n') else line + '\n')
-    
+
     return cleansed_lines, stats
 
 def write_cleansed_vcf(lines, output_path):
@@ -109,24 +109,24 @@ def get_file_path():
 def main():
     print_banner()
     target_file = get_file_path()
-    
+
     with open(target_file, 'r', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
-    
+
     print(f"Audit started on {len(lines)} lines...")
     cleansed_lines, stats = cleanse_vcf_lines(lines)
-    
+
     if not cleansed_lines:
         print("Audit Error: No valid data remaining.")
         return
-    
+
     # Use Timestamp to prevent name conflicts
     target_dir = os.path.dirname(os.path.abspath(target_file))
     timestamp = int(time.time())
     output_file = os.path.join(target_dir, f"sanitized_migration_{timestamp}.vcf")
-    
+
     file_hash = write_cleansed_vcf(cleansed_lines, output_file)
-    
+
     if file_hash:
         print("\n" + "="*45)
         print("AUDIT DEBRIEFING: MIGRATION READY")
