@@ -42,7 +42,7 @@ def cleanse_vcf_lines(lines):
 if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
         # If the line starts with whitespace, it's a continuation, not rot
         if line.startswith((' ', '\t')):
-        cleansed_lines.append(line)
+            cleansed_lines.append(line)
         continue
     stats["bit_rot_purged"] += 1
         continue
