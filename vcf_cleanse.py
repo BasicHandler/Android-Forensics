@@ -2,17 +2,18 @@
 import os
 import sys
 import hashlib
+import time
 
 def print_banner():
     GREEN = '\033[92m'
     ORANGE = '\033[38;5;208m'
     RESET = '\033[0m'
-    print(f"{GREEN}+++ BINO MELBINO CONTACT CLEANSE v2.1 +++{RESET}")
+    print(f"{GREEN}+++ BINO MELBINO CONTACT CLEANSE v2.2 +++{RESET}")
     print(f"{ORANGE}Deep Property Audit - Samsung to GrapheneOS Migration{RESET}")
 
 def cleanse_vcf_lines(lines):
     """
-    Deep Property Audit: Strips vendor telemetry and re-links identifiers.
+    Deep Property Audit: Strips vendor telemetry, bit-rot, and re-links identifiers.
     Returns: (cleansed_lines, stats_dictionary)
     """
     cleansed_lines = []
@@ -22,18 +23,27 @@ def cleanse_vcf_lines(lines):
         "stripped_vendor": 0,  # X-SAMSUNG, GOOGLE, etc.
         "stripped_keys": 0,    # UID, REV, PRODID
         "orphans_killed": 0,   # Lines outside BEGIN/END
-        "audit_trail": []
+        "bit_rot_purged": 0,   # Corrupted Base64/fragments
+        "audit_log": []
     }
     
+    # Comprehensive Proscribed Lists
     PROSCRIBED_PREFIXES = ('X-', 'GOOGLE-', 'X-MS-', 'X-SAMSUNG-', 'X-PHONETIC-')
     PROSCRIBED_KEYS = ('UID', 'REV', 'PRODID', 'PHOTO', 'VERSION')
 
     for line in lines:
         stats["scanned"] += 1
+        # Normalize encoding and remove Samsung-style CRLF
+        line = line.replace('\ufeff', '').replace('\r\n', '\n')
         stripped = line.strip()
         if not stripped: continue
 
-        # Structural Lock: Handle BEGIN/END and force RFC 6350 (v3.0)
+        # 1. Bit-Rot Guard: Kill orphaned fragments (broken Base64/orphaned data)
+        if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
+            stats["bit_rot_purged"] += 1
+            continue
+
+        # 2. Structural Lock: Handle BEGIN/END and force RFC 6350 (v3.0)
         if stripped.startswith('BEGIN:VCARD'):
             in_vcard = True
             cleansed_lines.append("BEGIN:VCARD\n")
@@ -44,24 +54,26 @@ def cleanse_vcf_lines(lines):
             cleansed_lines.append("END:VCARD\n")
             continue
 
-        # Filter 1: Kill orphan metadata (Outside vCard blocks)
+        # 3. Filter: Kill orphan metadata (Outside vCard blocks)
         if not in_vcard:
             stats["orphans_killed"] += 1
             continue
 
-        # Filter 2: Property-level audit
+        # 4. Property-level Audit
         if ':' in stripped:
+            # Isolate the key part before the colon
             full_key = stripped.split(':', 1)[0].upper()
+            # Handle property parameters (split by semicolon)
             base_key = full_key.split(';', 1)[0]
             
             if any(base_key.startswith(p) for p in PROSCRIBED_PREFIXES):
                 stats["stripped_vendor"] += 1
-                stats["audit_trail"].append(f"REMOVED_VENDOR_EXT: {base_key}")
+                stats["audit_log"].append(f"REMOVED_VENDOR_EXT: {base_key}")
                 continue
                 
             if base_key in PROSCRIBED_KEYS:
                 stats["stripped_keys"] += 1
-                stats["audit_logs"].append(f"REMOVED_ID: {base_key}")
+                stats["audit_log"].append(f"REMOVED_ID: {base_key}")
                 continue
 
         # Final keep: Ensure newline consistency
@@ -73,7 +85,6 @@ def write_cleansed_vcf(lines, output_path):
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.writelines(lines)
-        # Generate SHA-256 for the audit report
         sha256_hash = hashlib.sha256()
         with open(output_path, "rb") as f:
             for byte_block in iter(lambda: f.read(4096), b""):
@@ -104,29 +115,35 @@ def main():
         print("Audit Error: No valid data remaining.")
         return
     
+    # Use Timestamp to prevent name conflicts
     target_dir = os.path.dirname(os.path.abspath(target_file))
-    output_file = os.path.join(target_dir, "sanitized_migration.vcf")
+    timestamp = int(time.time())
+    output_file = os.path.join(target_dir, f"sanitized_migration_{timestamp}.vcf")
     
     file_hash = write_cleansed_vcf(cleansed_lines, output_file)
     
     if file_hash:
-        # --- COMPLETE DEBRIEFING ---
-        print("\n" + "="*40)
+        print("\n" + "="*45)
         print("AUDIT DEBRIEFING: MIGRATION READY")
-        print("="*40)
-        print(f"Status:       SUCCESS (RFC 6350 Compliant)")
-        print(f"Output:       {output_file}")
-        print(f"SHA-256:      {file_hash}")
+        print("="*45)
+        print(f"Status:        SUCCESS (RFC 6350 Compliant)")
+        print(f"Output:        {os.path.basename(output_file)}")
+        print(f"SHA-256:       {file_hash[:16]}...{file_hash[-16:]}")
         print(f"Lines Scanned: {stats['scanned']}")
-        print(f"Vendor Bloat: {stats['stripped_vendor']} fields removed")
-        print(f"Sync IDs:     {stats['stripped_keys']} trackers killed")
-        print(f"Orphan Lines: {stats['orphans_killed']} metadata lines purged")
-        print("-"*40)
+        print(f"Bit-Rot:       {stats['bit_rot_purged']} fragments purged")
+        print(f"Vendor Bloat:  {stats['stripped_vendor']} fields removed")
+        print(f"Sync IDs:      {stats['stripped_keys']} trackers killed")
+        print(f"Orphan Lines:  {stats['orphans_killed']} metadata lines purged")
+        print("-"*45)
         print("Notes: All Samsung/Google UIDs removed. Contacts will")
         print("appear as 'New' to GrapheneOS to prevent cloud re-sync.")
-        print("="*40)
+        print("="*45)
     else:
         print("Failed to write cleansed file!")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled by user.")
+        sys.exit(0)
