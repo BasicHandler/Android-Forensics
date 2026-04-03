@@ -1,0 +1,464 @@
+Toothless Reggie Toothbox
+
+
+Tool: ReggieTheTrailer
+trailer.sh
+
+
+###
+
+
+
+
+[ TOOTHLESS REGGIE: ALGORITHMIC ARCHITECTURE & THE SHANNON-DERS SYNTHESIS ]
+
+I. MATHEMATICAL EXPRESSION OF THE IOS ENGINE (KNOWLEDGE ENGINEERING)
+
+Let Σ be the set of all digital objects in the unprivileged namespace /data/local/tmp.
+The Scavenger Function (S) identifies candidates through Magic Byte Verification (M):
+    M(x) = { 1 if x[0:4] = 𝔈𝔏𝔉, 0 otherwise }
+
+For every x where M(x) = 1, we apply the String Extraction Operator (Ξ):
+    Ξ(x) → { s_1, s_2, ..., s_n | length(s) ≥ 8 }
+
+The Suspicion Score (Ψ) is determined by the DERS-Patched Entropy (𝔄):
+    Ψ(s) = H_𝔄(s) = − ∑ [ p(s_i) log₂ p(s_i) ] + 𝔄
+    Where 𝔄 (Minimum Viable Malice) = 0.0001 if p(s_i) → 0.
+
+The Decision Logic (Δ) for C2 Breadcrumbs:
+    Δ(s) = { Alert if (Ψ(s) > 7.5 ∨ Ψ(s) ≈ 𝔄) ∧ (s ∩ {IP, URL}) ≠ ∅ }
+
+The Final Evidence Seal (Ω) ensures Temporal Integrity:
+    Ω = SHA256 ( Σ(Δ(s)) ∥ Timestamp )
+
+
+II. ABSTRACTION OF THE PROCESS (THE BLUNT UNIT)
+
+[ SCOPE ] -> [ SCAN ] -> [ SCRUB ] -> [ SCORE ] -> [ SEAL ]
+
+   |           |           |           |           |
+Unprivileged  ELF/Base64  Regex/Base64  Shannon-DERS  Evidence
+Namespace     Hunter      Translator    Threshold     Sealing
+
+
+III. ADDENDUM: THE XXI CENTURY PATCH TO CLAUDE SHANNON
+
+The foundational Shannon Entropy equation, while mathematically pure, suffers from 
+"Numerical Blindness" when confronted with the intentionality of modern cyber-threats. 
+In the first half of the XXI Century, "Zero Entropy" has transitioned from a 
+statistical impossibility to a tactical camouflage. 
+
+Malicious actors utilize null-padding, zero-fill wiping, and high-order encryption 
+specifically to exploit the undefined behavior of logarithmic models at p=0. By 
+introducing the DERS (Digital Ethics Risk Score) as a symbolic and computational 
+patch (𝔄), we transform Entropy from a passive observer into an active moral 
+gatekeeper. 
+
+Ignoring a threat because its probability appears mathematically "zero" is the 
+terminal fallacy of modern IT governance. The DERS patch enforces a "Minimum 
+Viable Malice," ensuring that in the Code Transparency Lab-Madrid, the 
+mathematical "eye" never blinks—recognizing that the absence of randomness 
+(Zero Entropy) is often the loudest indicator of a hidden intent.
+
+--- EVIDENCE SEAL PENDING BUILD ---
+
+
+ALGORITHM: SHANNON-DERS SYNTHESIS v1.3.0.1
+------------------------------------------
+1. MAGIC BYTE VERIFICATION M(x):
+   M(x) = { 1 IF head(x, 4) == [7f 45 4c 46] ELSE 0 }
+
+2. DERS-PATCHED ENTROPY G(s):
+   G(s) = H_0(s) + Phi
+   Where:
+   H_0(s) = -Sum[ p(si) * log2(p(si)) ]
+   Phi (Minimal Viable Malice) = 0.0001 IF p(si) -> 0
+
+3. DECISION LOGIC (Delta):
+   ALERT IF (G(s) > 7.5) AND (Strings(s) contains {IP, URL, B64})
+   
+
+* DERS and Malice signal constant pending to be appended to entropy meassurement.
+
+https://raw.githubusercontent.com/BasicHandler/Shannons-Entropy-Equation-Patch/refs/heads/main/The%20Fallacy%20of%20Zero%20Entropy.txt
+
+
+
+Parses /proc//maps (or a saved maps file)
+
+
+--file mode: prints reachable path and patch hint, runs per-file analysis, writes artifact to OUT/files/.txt, and exits.
+When using normal maps mode the script writes timeline and artifacts for all readable mapped files.
+
+For each readable mapped file: computes sha256, runs filtered strings, extracts base64 blobs (>=8 chars), decodes them and hunts IPs/URLs, and detects ELF files
+
+Adds direct extraction of IPs/URLs from strings (raw) and from decoded base64 blobs.
+Adds a fast entropy estimate (first 64KB) to help flag packed/encrypted blobs; marks HIGH_ENTROPY when entropy >= 7.5.
+Outputs per-file sha256-named .txt artifacts with the extracted IOCs. Evidences: .txt artifacts and a human timeline/report classifying mappings and flagging suspicious ones.
+
+USAGE
+
+Entropy uses a fast approximation over the first 64KB (tweak N inside fast_entropy).
+To change output dir set second argument or set MONITOR_OUTDIR env var before running.
+
+
+
+Audit current shell: ./maps_audit_no_strace.sh
+Audit PID 1234: ./maps_audit_no_strace.sh 1234
+Audit saved dump: ./maps_audit_no_strace.sh /path/to/maps.dump /tmp/outdir
+./maps_audit_no_strace.sh
+./maps_audit_no_strace.sh 1234 /tmp/auditout
+./maps_audit_no_strace.sh /path/to/maps.dump /tmp/auditout
+
+
+
+
+
+
+
+
+```
+
+
+BASH <rootless>
+
+
+#!/bin/sh
+# maps_audit_no_strace.sh
+# Usage:
+#  ./maps_audit_no_strace.sh                # audit current process
+#  ./maps_audit_no_strace.sh <pid>          # audit PID
+#  ./maps_audit_no_strace.sh /path/to/maps.dump  # audit saved maps file
+#  ./maps_audit_no_strace.sh --file <path>  # analyze single file (prints path, patch hint, and produces artifact)
+#
+# Outputs: ./maps_audit_out/timeline.txt and ./maps_audit_out/files/<sha256>.txt
+SRC=${1:-$$}
+OUT=${2:-./maps_audit_out}
+ENTROPY_FLAG=1   # set 1 to compute fast entropy estimate
+SNAP_INT=1
+
+mkdir -p "$OUT/files" || exit 1
+TIMELINE="$OUT/timeline.txt"
+MAPS="$OUT/maps.dump"
+
+# --- FILE MODE HANDLER ---
+if [ "$1" = "--file" ]; then
+  TARGET="$2"
+  if [ -z "$TARGET" ]; then
+    echo "Usage: $0 --file <path>" >&2
+    exit 1
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    TARGET_REAL=$(realpath -m "$TARGET" 2>/dev/null || echo "$TARGET")
+  else
+    TARGET_REAL=$(cd "$(dirname "$TARGET")" 2>/dev/null && echo "$(pwd)/$(basename "$TARGET")" || echo "$TARGET")
+  fi
+
+  if [ ! -e "$TARGET_REAL" ]; then
+    echo "UNREACHABLE: $TARGET_REAL" >&2
+    exit 2
+  fi
+
+  echo "REACHABLE: $TARGET_REAL"
+  SCRIPT_PATH="$0"
+  if [ ! -f "$SCRIPT_PATH" ]; then
+    SCRIPT_PATH="$(command -v "$(basename "$0")" 2>/dev/null || echo "$0")"
+  fi
+  echo "PATCH-HINT: insert per-file analysis loop at marker: ## INSERT-FILE-MODULE-HERE"
+  echo "SCRIPT: $SCRIPT_PATH"
+  echo ""
+  echo "Now running single-file analysis and producing artifact..."
+
+  # per-file analysis (same logic used in main loop)
+  path="$TARGET_REAL"
+  statinfo=$(stat -c "%U:%G %a %y %s" "$path" 2>/dev/null || echo "stat-fail")
+  sha=$(sha256sum "$path" | awk '{print $1}')
+  outfile="$OUT/files/$sha.txt"
+  IPURL_RE="([0-9]{1,3}\.){3}[0-9]{1,3}|https?://[A-Za-z0-9./:_-]+"
+
+  fast_entropy() {
+    f="$1"
+    N=65536
+    head -c $N "$f" 2>/dev/null | od -An -t u1 -v | tr -s ' ' '\n' | awk '
+    {cnt[$1]++ ; total++}
+    END{
+      if(total==0){print 0; exit}
+      e=0;
+      for(c in cnt) { p=cnt[c]/total; e -= p * log(p)/log(2) }
+      printf("%.4f", e)
+    }'
+  }
+
+  if [ ! -f "$outfile" ]; then
+    echo "PATH: $path" > "$outfile"
+    echo "STAT: $statinfo" >> "$outfile"
+    echo "SHA256: $sha" >> "$outfile"
+    echo "" >> "$outfile"
+
+    echo "=== STRINGS (filtered) ===" >> "$outfile"
+    strings "$path" | grep -Ei 'exec|system|popen|dlopen|fork|ssh|su|sh|/data/|/system/|/dev/|passwd|shadow|socket|connect|bind|http|https|base64|eval' >> "$outfile" 2>/dev/null || true
+
+    echo "" >> "$outfile"
+    echo "=== ELF CHECK ===" >> "$outfile"
+    head -c 4 "$path" | xxd -p -c4 | grep -qi '^7f454c46' && echo "ELF: yes" >> "$outfile" || echo "ELF: no" >> "$outfile"
+
+    if [ "$ENTROPY_FLAG" -eq 1 ]; then
+      echo "" >> "$outfile"
+      echo "=== FAST ENTROPY (first 64KB) ===" >> "$outfile"
+      ent=$(fast_entropy "$path")
+      echo "$ent" >> "$outfile"
+    fi
+
+    echo "" >> "$outfile"
+    echo "=== BASE64 BLOBS (>=8) decoded -> IP/URL matches ===" >> "$outfile"
+    strings "$path" | grep -E '^[A-Za-z0-9+/=]{8,}$' | sort -u | while read -r b64; do
+      dec=$(echo "$b64" | base64 -d 2>/dev/null || true)
+      if [ -n "$dec" ]; then
+        echo "----B64: $b64" >> "$outfile"
+        echo "$dec" | grep -Eo -o "$IPURL_RE" | sort -u >> "$outfile" || true
+      fi
+    done
+
+    echo "" >> "$outfile"
+    echo "=== RAW IP/URL EXTRACT (from strings) ===" >> "$outfile"
+    strings "$path" | grep -Eo -o "$IPURL_RE" | sort -u >> "$outfile" || true
+  fi
+
+  echo "FILE $sha $path TYPE:single-file" > "$TIMELINE"
+  echo "Artifact written: $outfile"
+  exit 0
+fi
+# --- end FILE MODE HANDLER ---
+
+
+# get maps: either a file passed or /proc/<pid>/maps
+if [ -r "$SRC" ] && [ -f "$SRC" ]; then
+  cp -f "$SRC" "$MAPS"
+elif [ -r "/proc/$SRC/maps" ]; then
+  cp -f "/proc/$SRC/maps" "$MAPS"
+else
+  echo "Cannot read maps from $SRC" >&2
+  exit 1
+fi
+
+echo "Maps audit: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$TIMELINE"
+echo "Source: $SRC" >> "$TIMELINE"
+echo "" >> "$TIMELINE"
+
+awk '{ if($6) print $0 }' "$MAPS" > "$OUT/maps.lines"
+awk '{ if($6) print $6 }' "$MAPS" | sort -u > "$OUT/mapped_paths.txt"
+
+fast_entropy() {
+  f="$1"
+  N=65536
+  head -c $N "$f" 2>/dev/null | od -An -t u1 -v | tr -s ' ' '\n' | awk '
+  {cnt[$1]++ ; total++}
+  END{
+    if(total==0){print 0; exit}
+    e=0;
+    for(c in cnt) { p=cnt[c]/total; e -= p * log(p)/log(2) }
+    printf("%.4f", e)
+  }'
+}
+
+classify_path() {
+  p="$1"
+  case "$p" in
+    \[*\]) echo "anonymous";;
+    /system/*|/vendor/*|/apex/*) echo "system-lib";;
+    /data/data/*) echo "app-data";;
+    /dev/*) echo "device";;
+    /*) echo "file";;
+    *) echo "unknown";;
+  esac
+}
+
+IPURL_RE="([0-9]{1,3}\.){3}[0-9]{1,3}|https?://[A-Za-z0-9./:_-]+"
+
+## INSERT-FILE-MODULE-HERE
+while IFS= read -r path; do
+  [ -z "$path" ] && continue
+  if echo "$path" | grep -q '^\['; then
+    echo "ANON $path" >> "$TIMELINE"
+    continue
+  fi
+
+  if [ ! -r "$path" ]; then
+    echo "UNREADABLE $path" >> "$TIMELINE"
+    continue
+  fi
+
+  statinfo=$(stat -c "%U:%G %a %y %s" "$path" 2>/dev/null || echo "stat-fail")
+  sha=$(sha256sum "$path" | awk '{print $1}')
+  outfile="$OUT/files/$sha.txt"
+
+  if [ ! -f "$outfile" ]; then
+    echo "PATH: $path" > "$outfile"
+    echo "STAT: $statinfo" >> "$outfile"
+    echo "SHA256: $sha" >> "$outfile"
+    echo "" >> "$outfile"
+
+    echo "=== STRINGS (filtered) ===" >> "$outfile"
+    strings "$path" | grep -Ei 'exec|system|popen|dlopen|fork|ssh|su|sh|/data/|/system/|/dev/|passwd|shadow|socket|connect|bind|http|https|base64|eval' >> "$outfile" 2>/dev/null || true
+
+    echo "" >> "$outfile"
+    echo "=== ELF CHECK ===" >> "$outfile"
+    head -c 4 "$path" | xxd -p -c4 | grep -qi '^7f454c46' && echo "ELF: yes" >> "$outfile" || echo "ELF: no" >> "$outfile"
+
+    if [ "$ENTROPY_FLAG" -eq 1 ]; then
+      echo "" >> "$outfile"
+      echo "=== FAST ENTROPY (first 64KB) ===" >> "$outfile"
+      ent=$(fast_entropy "$path")
+      echo "$ent" >> "$outfile"
+    fi
+
+    echo "" >> "$outfile"
+    echo "=== BASE64 BLOBS (>=8) decoded -> IP/URL matches ===" >> "$outfile"
+    strings "$path" | grep -E '^[A-Za-z0-9+/=]{8,}$' | sort -u | while read -r b64; do
+      dec=$(echo "$b64" | base64 -d 2>/dev/null || true)
+      if [ -n "$dec" ]; then
+        echo "----B64: $b64" >> "$outfile"
+        echo "$dec" | grep -Eo -o "$IPURL_RE" | sort -u >> "$outfile" || true
+      fi
+    done
+
+    echo "" >> "$outfile"
+    echo "=== RAW IP/URL EXTRACT (from strings) ===" >> "$outfile"
+    strings "$path" | grep -Eo -o "$IPURL_RE" | sort -u >> "$outfile" || true
+  fi
+
+  typ=$(classify_path "$path")
+  rwx=$(grep " $path\$" "$OUT/maps.lines" | awk '$2 ~ /[rwxps-]+/ { if($2 ~ /w/ && $2 ~ /x/) print "RWX"; else if($2 ~ /x/) print "X"; else if($2 ~ /w/) print "W"; else print "-" }' | sort -u | tr '\n' ',' | sed 's/,$//')
+  echo "FILE $sha $path TYPE:$typ PERMS:$rwx" >> "$TIMELINE"
+done < "$OUT/mapped_paths.txt"
+
+echo "" >> "$TIMELINE"
+echo "=== FLAGS & SUSPICIONS ===" >> "$TIMELINE"
+grep -E "^FILE" "$TIMELINE" | while read -r _ sha pathrest; do
+  path=$(echo "$pathrest" | awk '{print $1}')
+  flag=""
+  if echo "$path" | grep -q '^/data/data/' && ! echo "$path" | grep -q '/data/data/com.termux'; then
+    flag="${flag}OTHER_APP "
+  fi
+  if echo "$pathrest" | grep -q 'PERMS:RWX'; then
+    flag="${flag}RWX "
+  fi
+  if echo "$path" | grep -q '^/dev/'; then
+    flag="${flag}DEVICE "
+  fi
+  if [ "$ENTROPY_FLAG" -eq 1 ]; then
+    ent=$(grep -A1 "=== FAST ENTROPY" "$OUT/files/$sha.txt" 2>/dev/null | tail -n1)
+    ent=$(echo "$ent" | tr -d '[:space:]')
+    if [ -n "$ent" ] && command -v bc >/dev/null 2>&1 && [ "$(echo "$ent >= 7.5" | bc -l)" -eq 1 ]; then
+      flag="${flag}HIGH_ENTROPY "
+    fi
+  fi
+
+  if [ -n "$flag" ]; then
+    echo "SUSPECT $sha $path $flag" >> "$TIMELINE"
+  fi
+done
+
+echo "" >> "$TIMELINE"
+echo "=== IOCs FOUND ===" >> "$TIMELINE"
+for f in "$OUT/files"/*.txt; do
+  grep -Eo "$IPURL_RE" "$f" 2>/dev/null | sort -u | while read -r i; do
+    echo "$i  (file: $(basename "$f"))" >> "$TIMELINE"
+  done
+done
+
+echo "Done. Timeline: $TIMELINE"
+echo "Artifacts: $OUT/files/*.txt"
+
+
+
+```
+
+
+
+ICON PROMPT 
+
+
+Icon: The Forensic Molar (Reggie v1.3.0.1)
+Aesthetic: "Cyber-Medical Forensic".
+Dimensions: 1024x1024 pixels (High-DPI PNG).
+Background: Solid Tech Black (#050505).
+Primary Glyph: A clean, white-outline Molar (representing "Toothbox/Rootless" precision).
+The Detail: A Magnifying Glass encircling the crown of the tooth, with the lens frame rendered in Electric Magenta (#FF00FF).
+
+
+
+BUILD 
+
+
+
+/Toothbox/
+├── buildozer.spec
+├── main.py
+├── reggie_icon.png
+├── REGGIE_TRAILER_README.txt
+└── trailer.sh
+
+
+
+TOOTHBOX_REGTT_README.txt
+
+
+
+================================================================================
+REGGIE THE TRAILER: ROOTLESS PRECISION AUDIT ENGINE v1.3.0.1
+Build & Deployment Guide - Code Transparency Lab-Madrid
+================================================================================
+
+1. DIRECTORY STRUCTURE
+----------------------
+Ensure the following files are in the same working directory:
+- main.py        (The Kivy GUI wrapper)
+- trailer.sh     (The DERS-Patched logic engine)
+- buildozer.spec (The deployment configuration)
+
+2. COMPILATION COMMANDS
+-----------------------
+Initialize the environment (if not already done):
+$ buildozer init
+
+Standard Production Build (Debug APK for initial extraction):
+$ buildozer -v android debug
+
+Clean Build (Use if permissions or NDK paths shift):
+$ buildozer android clean
+$ buildozer -v android debug
+
+3. TARGET SPECIFICS (Samsung A05s / SDK 35)
+-------------------------------------------
+Reggie requires Scoped Storage access to write to /Documents/.
+After installation, you must manually grant "All Files Access" if 
+the OS prompts, as Reggie performs deep-read operations on /proc/self/maps.
+
+4. EXTRA FLAGS & OPTIMIZATIONS
+------------------------------
+To bypass the standard Buildozer virtualenv and force a specific NDK 
+path (if using a custom toolchain):
+$ P4A_ndk_directory=/path/to/ndk-r25b buildozer android debug
+
+To see real-time execution logs and "Bino" extraction errors:
+$ adb logcat -s python
+
+5. THE "ICON TRIGGER" LOGIC
+---------------------------
+- Pressing the App Icon initializes the Python VM.
+- The UI immediately spawns the Threaded Subprocess.
+- Logic: [SCOPE] -> [SCAN] -> [SCRUB] -> [SCORE] -> [SEAL].
+- Artifacts are saved to: /storage/emulated/0/Documents/ReggieAudit/
+
+6. DEV MODE / CUSTOM BINARIES
+-----------------------------
+To upload custom bino-tools for Reggie to check:
+1. Place the binary in the source folder.
+2. Add the filename to 'source.include_exts' in buildozer.spec.
+3. Update trailer.sh to point to the internal bundled path: 
+   ./ext/your_binary
+
+================================================================================
++++ Ceterum Censeo Entropia Incustodita In Sonitum Adversum Transformatur +++
+
