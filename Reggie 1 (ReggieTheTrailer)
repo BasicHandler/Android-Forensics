@@ -1,8 +1,7 @@
-Toothless Reggie Toothbox
+Toothless Reggie Toothbox's "Reggie the Trailer" (first and main of the reggies)
 
 
-Tool: ReggieTheTrailer
-trailer.sh
+Tool: reggie.sh
 
 
 ###
@@ -285,6 +284,171 @@ while IFS= read -r path; do
 
   if [ ! -r "$path" ]; then
     echo "UNREADABLE $path" >> "$TIMELINE"
+BASH <rootless>
+
+
+#!/bin/sh
+# reggie.sh
+# Usage:
+#  ./maps_audit_no_strace.sh                # audit current process
+#  ./maps_audit_no_strace.sh <pid>          # audit PID
+#  ./maps_audit_no_strace.sh /path/to/maps.dump  # audit saved maps file
+#  ./maps_audit_no_strace.sh --file <path>  # analyze single file (prints path, patch hint, and produces artifact)
+#
+# Outputs: ./maps_audit_out/timeline.txt and ./maps_audit_out/files/<sha256>.txt
+SRC=${1:-$$}
+OUT=${2:-./maps_audit_out}
+ENTROPY_FLAG=1   # set 1 to compute fast entropy estimate
+SNAP_INT=1
+
+mkdir -p "$OUT/files" || exit 1
+TIMELINE="$OUT/timeline.txt"
+MAPS="$OUT/maps.dump"
+
+# --- FILE MODE HANDLER ---
+if [ "$1" = "--file" ]; then
+  TARGET="$2"
+  if [ -z "$TARGET" ]; then
+    echo "Usage: $0 --file <path>" >&2
+    exit 1
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    TARGET_REAL=$(realpath -m "$TARGET" 2>/dev/null || echo "$TARGET")
+  else
+    TARGET_REAL=$(cd "$(dirname "$TARGET")" 2>/dev/null && echo "$(pwd)/$(basename "$TARGET")" || echo "$TARGET")
+  fi
+
+  if [ ! -e "$TARGET_REAL" ]; then
+    echo "UNREACHABLE: $TARGET_REAL" >&2
+    exit 2
+  fi
+
+  echo "REACHABLE: $TARGET_REAL"
+  SCRIPT_PATH="$0"
+  if [ ! -f "$SCRIPT_PATH" ]; then
+    SCRIPT_PATH="$(command -v "$(basename "$0")" 2>/dev/null || echo "$0")"
+  fi
+  echo "PATCH-HINT: insert per-file analysis loop at marker: ## INSERT-FILE-MODULE-HERE"
+  echo "SCRIPT: $SCRIPT_PATH"
+  echo ""
+  echo "Now running single-file analysis and producing artifact..."
+
+  # per-file analysis (same logic used in main loop)
+  path="$TARGET_REAL"
+  statinfo=$(stat -c "%U:%G %a %y %s" "$path" 2>/dev/null || echo "stat-fail")
+  sha=$(sha256sum "$path" | awk '{print $1}')
+  outfile="$OUT/files/$sha.txt"
+  IPURL_RE="([0-9]{1,3}\.){3}[0-9]{1,3}|https?://[A-Za-z0-9./:_-]+"
+
+  fast_entropy() {
+    f="$1"
+    N=65536
+    head -c $N "$f" 2>/dev/null | od -An -t u1 -v | tr -s ' ' '\n' | awk '
+    {cnt[$1]++ ; total++}
+    END{
+      if(total==0){print 0; exit}
+      e=0;
+      for(c in cnt) { p=cnt[c]/total; e -= p * log(p)/log(2) }
+      printf("%.4f", e)
+    }'
+  }
+
+  if [ ! -f "$outfile" ]; then
+    echo "PATH: $path" > "$outfile"
+    echo "STAT: $statinfo" >> "$outfile"
+    echo "SHA256: $sha" >> "$outfile"
+    echo "" >> "$outfile"
+
+    echo "=== STRINGS (filtered) ===" >> "$outfile"
+    strings "$path" | grep -Ei 'exec|system|popen|dlopen|fork|ssh|su|sh|/data/|/system/|/dev/|passwd|shadow|socket|connect|bind|http|https|base64|eval' >> "$outfile" 2>/dev/null || true
+
+    echo "" >> "$outfile"
+    echo "=== ELF CHECK ===" >> "$outfile"
+    head -c 4 "$path" | xxd -p -c4 | grep -qi '^7f454c46' && echo "ELF: yes" >> "$outfile" || echo "ELF: no" >> "$outfile"
+
+    if [ "$ENTROPY_FLAG" -eq 1 ]; then
+      echo "" >> "$outfile"
+      echo "=== FAST ENTROPY (first 64KB) ===" >> "$outfile"
+      ent=$(fast_entropy "$path")
+      echo "$ent" >> "$outfile"
+    fi
+
+    echo "" >> "$outfile"
+    echo "=== BASE64 BLOBS (>=8) decoded -> IP/URL matches ===" >> "$outfile"
+    strings "$path" | grep -E '^[A-Za-z0-9+/=]{8,}$' | sort -u | while read -r b64; do
+      dec=$(echo "$b64" | base64 -d 2>/dev/null || true)
+      if [ -n "$dec" ]; then
+        echo "----B64: $b64" >> "$outfile"
+        echo "$dec" | grep -Eo -o "$IPURL_RE" | sort -u >> "$outfile" || true
+      fi
+    done
+
+    echo "" >> "$outfile"
+    echo "=== RAW IP/URL EXTRACT (from strings) ===" >> "$outfile"
+    strings "$path" | grep -Eo -o "$IPURL_RE" | sort -u >> "$outfile" || true
+  fi
+
+  echo "FILE $sha $path TYPE:single-file" > "$TIMELINE"
+  echo "Artifact written: $outfile"
+  exit 0
+fi
+# --- end FILE MODE HANDLER ---
+
+
+# get maps: either a file passed or /proc/<pid>/maps
+if [ -r "$SRC" ] && [ -f "$SRC" ]; then
+  cp -f "$SRC" "$MAPS"
+elif [ -r "/proc/$SRC/maps" ]; then
+  cp -f "/proc/$SRC/maps" "$MAPS"
+else
+  echo "Cannot read maps from $SRC" >&2
+  exit 1
+fi
+
+echo "Maps audit: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$TIMELINE"
+echo "Source: $SRC" >> "$TIMELINE"
+echo "" >> "$TIMELINE"
+
+awk '{ if($6) print $0 }' "$MAPS" > "$OUT/maps.lines"
+awk '{ if($6) print $6 }' "$MAPS" | sort -u > "$OUT/mapped_paths.txt"
+
+fast_entropy() {
+  f="$1"
+  N=65536
+  head -c $N "$f" 2>/dev/null | od -An -t u1 -v | tr -s ' ' '\n' | awk '
+  {cnt[$1]++ ; total++}
+  END{
+    if(total==0){print 0; exit}
+    e=0;
+    for(c in cnt) { p=cnt[c]/total; e -= p * log(p)/log(2) }
+    printf("%.4f", e)
+  }'
+}
+
+classify_path() {
+  p="$1"
+  case "$p" in
+    \[*\]) echo "anonymous";;
+    /system/*|/vendor/*|/apex/*) echo "system-lib";;
+    /data/data/*) echo "app-data";;
+    /dev/*) echo "device";;
+    /*) echo "file";;
+    *) echo "unknown";;
+  esac
+}
+
+IPURL_RE="([0-9]{1,3}\.){3}[0-9]{1,3}|https?://[A-Za-z0-9./:_-]+"
+
+## INSERT-FILE-MODULE-HERE
+while IFS= read -r path; do
+  [ -z "$path" ] && continue
+  if echo "$path" | grep -q '^\['; then
+    echo "ANON $path" >> "$TIMELINE"
+    continue
+  fi
+
+  if [ ! -r "$path" ]; then
+    echo "UNREADABLE $path" >> "$TIMELINE"
     continue
   fi
 
@@ -374,8 +538,6 @@ echo "Artifacts: $OUT/files/*.txt"
 
 ```
 
-
-
 ICON PROMPT 
 
 
@@ -460,5 +622,7 @@ To upload custom bino-tools for Reggie to check:
    ./ext/your_binary
 
 ================================================================================
-+++ Ceterum Censeo Entropia Incustodita In Sonitum Adversum Transformatur +++
+Entropia non exsanita, finis est catenae custodiae.
+
+Ceterum Censeo Entropia Incustodita In Sonitum Adversum Transformatur
 
