@@ -79,7 +79,7 @@ for arg in "$@"; do
     
     -h|--help)
       echo
-      echo "Usage: ./G.sh [options]"
+      echo "Usage: ./getdescriptions.sh [options]"
       echo
       echo "Package Analysis:"
       echo "  -1         Include Termux/Python package descriptions"
