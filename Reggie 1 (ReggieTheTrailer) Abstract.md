@@ -376,10 +376,8 @@ echo "Artifacts: $OUT/files/*.txt"
 
 ```
 
-================================================================================
 REGGIE THE TRAILER: ROOTLESS PRECISION AUDIT ENGINE v1.3.0.1
 Build & Deployment Guide - Code Transparency Lab-Madrid
-================================================================================
 
 1. DIRECTORY STRUCTURE
 ----------------------
@@ -430,7 +428,6 @@ To upload custom bino-tools for Reggie to check:
 3. Update trailer.sh to point to the internal bundled path: 
    ./ext/your_binary
 
-================================================================================
 Entropia non exsanita, finis est catenae custodiae.
 
 Ceterum Censeo Entropia Incustodita In Sonitum Adversum Transformatur
