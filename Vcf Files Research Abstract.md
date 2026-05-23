@@ -452,9 +452,10 @@ if __name__ == "__main__":
 ```
 
 
-###
 
-[ THE PROJECT'S CONCEPT ]
+
+[ THE PROJECT'S CONCEPT ] 
+
 "We do not pretend nothing with the data; we protect its Structural Truth. By transcoding complex binaries into Atomic Text, we kill the persistence of the past to ensure the safety of the future."
 
 Entropia non exsanita, finis est catenae custodiae.
