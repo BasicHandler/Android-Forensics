@@ -1,3 +1,6 @@
+```
+Python 
+
 #!/usr/bin/env python3
 import os
 import sys
@@ -8,12 +11,12 @@ def print_banner():
     GREEN = '\033[92m'
     ORANGE = '\033[38;5;208m'
     RESET = '\033[0m'
-    print(f"{GREEN}+++ BINO MELBINO CONTACT CLEANSE v2.1 +++{RESET}")
-    print(f"{ORANGE}Deep Property Audit - Samsung to GrapheneOS Migration{RESET}")
+    print(f"{GREEN}+++ CTLM FORENSIC CONTACT CLEANSE v2.3 COMMERCIAL ANDROID, SAMSUNG (+AOSP) UP TO GRAPHENEOS SPECIFICS+++{RESET}")
+    print(f"{ORANGE}Deep Property Audit - Commercial Android, moreover Samsung + AOSP to GrapheneOS, Ideal for Migration Purposes {RESET}")
 
 def cleanse_vcf_lines(lines):
     """
-    Deep Property Audit: Strips vendor telemetry and re-links identifiers.
+    Deep Property Audit: Strips vendor telemetry, bit-rot, and re-links identifiers.
     Returns: (cleansed_lines, stats_dictionary)
     """
     cleansed_lines = []
@@ -23,40 +26,52 @@ def cleanse_vcf_lines(lines):
         "stripped_vendor": 0,  # X-SAMSUNG, GOOGLE, etc.
         "stripped_keys": 0,    # UID, REV, PRODID
         "orphans_killed": 0,   # Lines outside BEGIN/END
-        "audit_log": []        # Standardized log key
+        "bit_rot_purged": 0,   # Corrupted Base64/fragments
+        "audit_log": []
     }
 
+    # Comprehensive Proscribed Lists
     PROSCRIBED_PREFIXES = ('X-', 'GOOGLE-', 'X-MS-', 'X-SAMSUNG-', 'X-PHONETIC-')
     PROSCRIBED_KEYS = ('UID', 'REV', 'PRODID', 'PHOTO', 'VERSION')
 
     for line in lines:
         stats["scanned"] += 1
-        # Normalize line endings for cross-platform stability
+        # Normalize encoding and remove Samsung-style CRLF
         line = line.replace('\ufeff', '').replace('\r\n', '\n')
         stripped = line.strip()
         if not stripped: continue
 
-        # Structural Lock: Handle BEGIN/END and force RFC 6350 (v3.0)
-        upper_stripped = stripped.upper()
-        if upper_stripped.startswith('BEGIN:VCARD'):
+        # 1 Updated Bit-Rot Guard in cleanse_vcf_lines:
+if ':' not in stripped and not stripped.startswith(('BEGIN', 'END')):
+        # If the line starts with whitespace, it's a continuation, not rot
+        if line.startswith((' ', '\t')):
+            cleansed_lines.append(line)
+        continue
+    stats["bit_rot_purged"] += 1
+        continue
+
+
+        # 2. Structural Lock: Handle BEGIN/END and force RFC 6350 (v3.0)
+        if stripped.startswith('BEGIN:VCARD'):
             in_vcard = True
             cleansed_lines.append("BEGIN:VCARD\n")
-            cleansed_lines.append("VERSION:3.0\n")
+            cleansed_lines.append("VERSION:3.0\n") 
             continue
-        elif upper_stripped.startswith('END:VCARD'):
+        elif stripped.startswith('END:VCARD'):
             in_vcard = False
             cleansed_lines.append("END:VCARD\n")
             continue
 
-        # Filter 1: Kill orphan metadata (Outside vCard blocks)
+        # 3. Filter: Kill orphan metadata (Outside vCard blocks)
         if not in_vcard:
             stats["orphans_killed"] += 1
             continue
 
-        # Filter 2: Property-level audit
+        # 4. Property-level Audit
         if ':' in stripped:
-            # Handle potential parameters (e.g., TEL;TYPE=CELL:...)
+            # Isolate the key part before the colon
             full_key = stripped.split(':', 1)[0].upper()
+            # Handle property parameters (split by semicolon)
             base_key = full_key.split(';', 1)[0]
 
             if any(base_key.startswith(p) for p in PROSCRIBED_PREFIXES):
@@ -98,43 +113,38 @@ def main():
     print_banner()
     target_file = get_file_path()
 
-    # Use 'utf-8-sig' to handle potential Samsung BOMs automatically
-    try:
-        with open(target_file, 'r', encoding='utf-8-sig', errors='ignore') as f:
-            lines = f.readlines()
-    except Exception as e:
-        print(f"Read Error: {e}")
-        return
+    with open(target_file, 'r', encoding='utf-8', errors='ignore') as f:
+        lines = f.readlines()
 
     print(f"Audit started on {len(lines)} lines...")
     cleansed_lines, stats = cleanse_vcf_lines(lines)
 
     if not cleansed_lines:
-        print("Audit Error: No valid data remained.")
+        print("Audit Error: No valid data remaining.")
         return
 
-    # Deterministic output naming using a timestamp
+    # Use Timestamp to prevent name conflicts
     target_dir = os.path.dirname(os.path.abspath(target_file))
-    ts = int(time.time())
-    output_file = os.path.join(target_dir, f"sanitized_migration_{ts}.vcf")
+    timestamp = int(time.time())
+    output_file = os.path.join(target_dir, f"sanitized_migration_{timestamp}.vcf")
 
     file_hash = write_cleansed_vcf(cleansed_lines, output_file)
 
     if file_hash:
-        # --- COMPLETE DEBRIEFING ---
         print("\n" + "="*45)
         print("AUDIT DEBRIEFING: MIGRATION READY")
         print("="*45)
-        print(f"Status:        SUCCESS (RFC 6350)")
+        print(f"Status:        SUCCESS (RFC 6350 Compliant)")
         print(f"Output:        {os.path.basename(output_file)}")
         print(f"SHA-256:       {file_hash[:16]}...{file_hash[-16:]}")
         print(f"Lines Scanned: {stats['scanned']}")
+        print(f"Bit-Rot:       {stats['bit_rot_purged']} fragments purged")
         print(f"Vendor Bloat:  {stats['stripped_vendor']} fields removed")
         print(f"Sync IDs:      {stats['stripped_keys']} trackers killed")
         print(f"Orphan Lines:  {stats['orphans_killed']} metadata lines purged")
         print("-"*45)
-        print("Notes: All Samsung/Google UIDs removed. Contacts will")
-        print("appear as 'New' to GrapheneOS to prevent cloud re-sync.")
+        print("Notes: All /Comercial Android/AOSP/Samsung/Google UIDs removed. Contacts will")
+        print("appear as 'New' to GrapheneOS (+AOSP) to prevent cloud re-sync.")
         print("="*45)
     else:
         print("Failed to write cleansed file!")
@@ -143,5 +153,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\nAudit cancelled by user.")
+        print("\n\nOperation cancelled by user.")
         sys.exit(0)
+
+```
+            
