@@ -1,20 +1,3 @@
-BASH <rootless>
-
-# === Color Codes for Display ===
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[1;34m'
-PURPLE='\033[0;35m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# == Identity ==
-echo -e "${PURPLE}###  - Toothless Reggie's Toothbox Reggie 1, 'reggie': Reggie the Trailer From The Code Transparency Lab"
-echo -e "Session: ${BLUE}$(date '+%Y-%m-%d %H:%M:%S')${NC}"
-echo -e "Platform: $(uname -o) $(uname -m) | Bash ${GREEN}$BASH_VERSION${NC}"
-
-
-
 #!/bin/sh
 # reggie.sh
 # Usage:
@@ -262,7 +245,4 @@ done
 echo "Done. Timeline: $TIMELINE"
 echo "Artifacts: $OUT/files/*.txt"
 
-
-
-```
 
